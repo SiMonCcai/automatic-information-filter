@@ -1,10 +1,10 @@
 // 引入 Upstash KV 存储
 import { Redis } from '@upstash/redis';
 
-// 初始化 Upstash Redis 客户端（从环境变量读取配置）更新
+// 初始化 Upstash Redis 客户端（使用 Vercel 自动生成的 KV_ 前缀变量）
 const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+  url: process.env.KV_REST_API_URL,  // 改为 Vercel 自动生成的变量名
+  token: process.env.KV_REST_API_TOKEN,  // 改为 Vercel 自动生成的变量名
 });
 
 // 处理GET请求（OAuth回调默认使用GET方法）
@@ -19,7 +19,7 @@ export async function GET(request) {
       return new Response(`
         <h3>配置错误</h3>
         <p>请先配置环境变量：INOREADER_CLIENT_ID、INOREADER_CLIENT_SECRET、INOREADER_REDIRECT_URI</p>
-      `, { status: 500, headers: { 'Content-Type': 'text/html' } });
+      `, { status: 500, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     }
 
     // 2. 处理授权流程
@@ -53,7 +53,7 @@ export async function GET(request) {
             </a>
           </body>
         </html>
-      `, { status: 200, headers: { 'Content-Type': 'text/html' } });
+      `, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     } else {
       // 有授权码时：验证state + 交换令牌 + 存入Upstash KV
       if (!state) {
@@ -61,7 +61,7 @@ export async function GET(request) {
           <h3>授权失败</h3>
           <p>缺少state参数，可能存在安全风险</p>
           <p><a href="${url.origin}/api/oauth-callback">返回重试</a></p>
-        `, { status: 400, headers: { 'Content-Type': 'text/html' } });
+        `, { status: 400, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       }
 
       const stateValid = await redis.get(`oauth_state:${state}`);
@@ -70,7 +70,7 @@ export async function GET(request) {
           <h3>授权失败</h3>
           <p>state验证失败，可能存在安全风险或授权已过期</p>
           <p><a href="${url.origin}/api/oauth-callback">返回重试</a></p>
-        `, { status: 403, headers: { 'Content-Type': 'text/html' } });
+        `, { status: 403, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       }
 
       await redis.del(`oauth_state:${state}`);
@@ -95,7 +95,7 @@ export async function GET(request) {
           <h3>令牌交换失败</h3>
           <p>错误信息：${errorMsg}</p>
           <p>请返回重新授权 <a href="${url.origin}/api/oauth-callback">重试</a></p>
-        `, { status: 500, headers: { 'Content-Type': 'text/html' } });
+        `, { status: 500, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       }
 
       const { access_token, refresh_token, expires_in, token_type } = tokenData;
@@ -104,7 +104,7 @@ export async function GET(request) {
           <h3>令牌数据不完整</h3>
           <p>从Inoreader获取的令牌数据不完整</p>
           <p><a href="${url.origin}/api/oauth-callback">返回重试</a></p>
-        `, { status: 500, headers: { 'Content-Type': 'text/html' } });
+        `, { status: 500, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       }
       
       const tokenStoreData = {
@@ -136,7 +136,7 @@ export async function GET(request) {
             </p>
           </body>
         </html>
-      `, { status: 200, headers: { 'Content-Type': 'text/html' } });
+      `, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     }
   } catch (error) {
     console.error('授权过程出错:', error);
@@ -145,6 +145,6 @@ export async function GET(request) {
       <h3>系统错误</h3>
       <p>错误信息：${error.message}</p>
       <p>请返回重新授权 <a href="${url.origin}/api/oauth-callback">重试</a></p>
-    `, { status: 500, headers: { 'Content-Type': 'text/html' } });
+    `, { status: 500, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
   }
 }
