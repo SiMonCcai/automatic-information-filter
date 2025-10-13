@@ -1,203 +1,188 @@
+import { Redis } from '@upstash/redis';
 import { Client } from '@notionhq/client';
 
-function pickPublished(item) {
-  // Inoreader 的 published 通常是 Unix 秒
-  if (item?.published) return new Date(item.published * 1000).toISOString();
-  return new Date().toISOString();
+// 初始化Redis客户端
+const redis = new Redis({
+  url: process.env.KV_REST_API_URL,
+  token: process.env.KV_REST_API_TOKEN,
+});
+
+// 初始化Notion客户端
+const notion = new Client({
+  auth: process.env.NOTION_TOKEN,
+});
+
+// 处理Inoreader和Notion同步的核心函数
+async function syncInoreaderToNotion() {
+  try {
+    // 1. 从Redis获取Inoreader令牌
+    const tokenDataStr = await redis.get('inoreader_tokens');
+    if (!tokenDataStr) {
+      throw new Error('未找到Inoreader令牌，请先完成授权');
+    }
+    
+    const tokenData = JSON.parse(tokenDataStr);
+    const { accessToken } = tokenData;
+    
+    // 检查令牌是否过期
+    if (Date.now() > tokenData.expiresAt) {
+      throw new Error('Inoreader令牌已过期，请重新授权');
+    }
+
+    // 2. 从Inoreader拉取星标文章
+    const starredItemsResponse = await fetch(
+      'https://www.inoreader.com/reader/api/0/stream/contents/user/-/state/com.google/starred',
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    if (!starredItemsResponse.ok) {
+      throw new Error(`拉取Inoreader数据失败: ${starredItemsResponse.statusText}`);
+    }
+
+    const starredData = await starredItemsResponse.json();
+    const items = starredData.items || [];
+    
+    // 限制导入数量，避免一次性导入过多
+    const MAX_IMPORT = 10;
+    const itemsToImport = items.slice(0, MAX_IMPORT);
+
+    // 3. 同步到Notion数据库
+    const databaseId = process.env.NOTION_DATABASE_ID;
+    if (!databaseId) {
+      throw new Error('未配置Notion数据库ID');
+    }
+
+    for (const item of itemsToImport) {
+      // 检查是否已存在相同URL的页面
+      const existingPages = await notion.databases.query({
+        database_id: databaseId,
+        filter: {
+          property: 'URL',
+          url: {
+            equals: item.canonical[0]?.href || item.alternate[0]?.href
+          }
+        }
+      });
+
+      if (existingPages.results.length > 0) {
+        console.log(`页面已存在，跳过: ${item.title}`);
+        continue;
+      }
+
+      // 提取文章内容
+      let content = '';
+      if (item.summary?.content) {
+        content = item.summary.content;
+      }
+
+      // 提取第一张图片URL
+      let imageUrl = '';
+      if (item.enclosure?.length) {
+        imageUrl = item.enclosure[0].href;
+      }
+
+      // 创建Notion页面
+      await notion.pages.create({
+        parent: { database_id: databaseId },
+        properties: {
+          Name: {
+            title: [
+              {
+                text: {
+                  content: item.title || '无标题文章'
+                }
+              }
+            ]
+          },
+          URL: {
+            url: item.canonical[0]?.href || item.alternate[0]?.href
+          },
+          '来源': {  // 修正：中文属性名添加引号
+            select: {
+              name: item.origin?.title || '未知来源'
+            }
+          },
+          '收藏时间': {  // 修正：中文属性名添加引号
+            date: {
+              start: new Date(item.published * 1000).toISOString()
+            }
+          }
+        },
+        children: [
+          // 添加图片块（如果有图片）
+          ...(imageUrl
+            ? [
+                {
+                  type: 'image',
+                  image: {
+                    type: 'external',
+                    external: {
+                      url: imageUrl
+                    }
+                  }
+                }
+              ]
+            : []),
+          // 添加内容块
+          {
+            type: 'paragraph',
+            paragraph: {
+              rich_text: [
+                {
+                  type: 'text',
+                  text: {
+                    content: content || '无摘要内容'
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      });
+
+      console.log(`成功导入: ${item.title}`);
+    }
+
+    return {
+      success: true,
+      message: `成功同步 ${itemsToImport.length} 篇文章到Notion`,
+      count: itemsToImport.length
+    };
+  } catch (error) {
+    console.error('同步过程出错:', error);
+    throw new Error(`同步失败: ${error.message}`);
+  }
 }
 
-// 提取URL的辅助函数
-function pickUrl(item) {
-  return item?.alternate?.[0]?.href || item?.canonical?.[0]?.href;
+// 支持GET方法
+export async function GET(request) {
+  return await POST(request);
 }
 
-// 提取内容的辅助函数
-function pickContent(item) {
-  return item?.content?.content || item?.summary || '';
-}
-
-// 清洗内容的函数：移除HTML标签、图片链接、所有空格
-function cleanContent(html) {
-  if (!html) return '';
-  
-  // 1. 移除所有HTML标签
-  let text = html.replace(/<[^>]*>?/gm, '');
-  
-  // 2. 移除图片链接（匹配各种图片格式的URL）
-  text = text.replace(/https?:\/\/[^\s]*?\.(jpg|jpeg|png|gif|bmp|webp|svg)[^\s]*/gi, '');
-  
-  // 3. 移除所有空格（包括空格、制表符、换行符等）
-  text = text.replace(/\s+/g, '');
-  
-  return text;
-}
-
-const notion = new Client({ auth: process.env.NOTION_TOKEN });
-
-async function pageExistsByUrl(dbId, url) {
-  if (!url) return false;
-  const resp = await notion.databases.query({
-    database_id: dbId,
-    filter: {
-      property: 'URL',
-      url: { equals: url }
-    },
-    page_size: 1
-  });
-  return resp.results.length > 0;
-}
-
-async function createNotionPage(dbId, { title, url, published, source, content }) {
-  // 把正文切块（Notion 单个 rich_text 块长度有限制，这里做简易切割）
-  const MAX_BLOCK = 1800; // 单块最大字符
-  const blocks = [];
-  const text = content || '';
-  for (let i = 0; i < text.length; i += MAX_BLOCK) {
-    blocks.push({
-      object: 'block',
-      type: 'paragraph',
-      paragraph: {
-        rich_text: [{ type: 'text', text: { content: text.slice(i, i + MAX_BLOCK) } }]
+// 保留POST方法
+export async function POST(request) {
+  try {
+    const result = await syncInoreaderToNotion();
+    return new Response(JSON.stringify(result), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json'
       }
     });
-    if (blocks.length >= 8) break; // 最多 8 块，避免一次写太多
-  }
-
-  return notion.pages.create({
-    parent: { database_id: dbId },
-    properties: {
-      Name: { title: [{ text: { content: title || '(无标题)' } }] },
-      URL: url ? { url } : undefined,
-      Published: published ? { date: { start: published } } : undefined,
-      Source: source ? { rich_text: [{ text: { content: source } }] } : undefined
-    },
-    children: blocks
-  });
-}
-
-// 刷新令牌函数
-async function refreshAccessToken(refreshToken) {
-  const clientId = process.env.INOREADER_CLIENT_ID;
-  const clientSecret = process.env.INOREADER_CLIENT_SECRET;
-  const redirectUri = process.env.INOREADER_REDIRECT_URI;
-
-  if (!clientId || !clientSecret || !redirectUri) {
-    throw new Error('缺少Inoreader客户端配置信息');
-  }
-
-  const response = await fetch('https://www.inoreader.com/oauth2/token', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded'
-    },
-    body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken,
-      redirect_uri: redirectUri
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error(`刷新令牌失败: ${response.statusText}`);
-  }
-
-  const data = await response.json();
-  
-  // 计算过期时间（当前时间 + 有效期秒数）
-  const expiresAt = Date.now() + (data.expires_in * 1000);
-  
-  return {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token || refreshToken, // 有些服务可能返回新的refresh_token
-    tokenType: data.token_type,
-    expiresAt
-  };
-}
-
-// 获取访问令牌的函数（包含自动刷新功能）
-async function getAccessToken() {
-  const { Redis } = await import('@upstash/redis');
-  const redis = new Redis({
-    url: process.env.UPSTASH_REDIS_REST_URL,
-    token: process.env.UPSTASH_REDIS_REST_TOKEN,
-  });
-  
-  const tokenData = await redis.get('inoreader_tokens');
-  if (!tokenData) {
-    throw new Error('未找到访问令牌，请先完成授权');
-  }
-  
-  let parsed = JSON.parse(tokenData);
-  
-  // 检查令牌是否即将过期（提前300秒刷新，避免边缘情况）
-  if (parsed.expiresAt < Date.now() + 300000) {
-    console.log('令牌即将过期或已过期，尝试刷新...');
-    try {
-      // 调用刷新令牌函数
-      const newTokenData = await refreshAccessToken(parsed.refreshToken);
-      // 保存新的令牌数据到Redis
-      await redis.set('inoreader_tokens', JSON.stringify(newTokenData));
-      parsed = newTokenData;
-      console.log('令牌刷新成功');
-    } catch (error) {
-      console.error('令牌刷新失败:', error);
-      throw new Error('令牌刷新失败，请重新授权');
-    }
-  }
-  
-  return `${parsed.tokenType} ${parsed.accessToken}`;
-}
-
-// 获取Inoreader内容的函数
-async function fetchInoreaderItems(accessToken) {
-  const MAX_IMPORT = process.env.MAX_IMPORT ? parseInt(process.env.MAX_IMPORT) : 5; // 从环境变量获取最大导入数量
-  const apiUrl = `https://www.inoreader.com/reader/api/0/stream/contents/user/-/state/com.google/starred?n=${MAX_IMPORT}`;
-  
-  const response = await fetch(apiUrl, {
-    headers: {
-      'Authorization': accessToken
-    }
-  });
-  
-  if (!response.ok) {
-    throw new Error(`获取Inoreader内容失败: ${response.statusText}`);
-  }
-  
-  const data = await response.json();
-  return data.items || [];
-}
-
-export default async function handler(req, res) {
-  try {
-    if (!process.env.NOTION_TOKEN || !process.env.NOTION_DATABASE_ID) {
-      return res.status(500).json({ error: 'Missing NOTION envs' });
-    }
-
-    const accessToken = await getAccessToken();
-    const items = await fetchInoreaderItems(accessToken);
-    const MAX_IMPORT = process.env.MAX_IMPORT ? parseInt(process.env.MAX_IMPORT) : 5;
-
-    let imported = 0;
-    for (const item of items) {
-      if (imported >= MAX_IMPORT) break;
-
-      const url = pickUrl(item);
-      const title = item?.title || '';
-      const published = pickPublished(item);
-      const source = url ? new URL(url).hostname : 'inoreader';
-      const content = cleanContent(pickContent(item));
-
-      const exists = await pageExistsByUrl(process.env.NOTION_DATABASE_ID, url);
-      if (exists) continue; // 去重
-
-      await createNotionPage(process.env.NOTION_DATABASE_ID, { title, url, published, source, content });
-      imported++;
-    }
-
-    return res.status(200).json({ ok: true, imported });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e) });
+  } catch (error) {
+    return new Response(JSON.stringify({
+      success: false,
+      message: error.message
+    }), {
+      status: 500,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
   }
 }
+    

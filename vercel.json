@@ -1,8 +1,10 @@
 {
-  "crons": [
+  "cron": [
     {
       "path": "/api/pull",
-      "schedule": "0 0 * * *"
+      "schedule": "0 0 * * *",
+      "method": "GET"
     }
   ]
 }
+    
