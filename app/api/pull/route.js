@@ -40,7 +40,7 @@ async function syncInoreaderToNotion() {
     );
 
     if (!starredItemsResponse.ok) {
-      throw new Error(`拉取Inoreader数据失败: ${starredItemsResponse.statusText}`);
+      throw new Error(`拉取Inoreader数据失败: ${starredItemsResponse.status} ${starredItemsResponse.statusText}`);
     }
 
     const starredData = await starredItemsResponse.json();
@@ -57,19 +57,26 @@ async function syncInoreaderToNotion() {
     }
 
     for (const item of itemsToImport) {
+      // 获取文章URL，增加容错处理
+      const articleUrl = item.canonical?.[0]?.href || item.alternate?.[0]?.href;
+      if (!articleUrl) {
+        console.log(`文章URL不存在，跳过: ${item.title || '无标题'}`);
+        continue;
+      }
+
       // 检查是否已存在相同URL的页面
       const existingPages = await notion.databases.query({
         database_id: databaseId,
         filter: {
           property: 'URL',
           url: {
-            equals: item.canonical[0]?.href || item.alternate[0]?.href
+            equals: articleUrl
           }
         }
       });
 
       if (existingPages.results.length > 0) {
-        console.log(`页面已存在，跳过: ${item.title}`);
+        console.log(`页面已存在，跳过: ${item.title || '无标题'}`);
         continue;
       }
 
@@ -85,6 +92,11 @@ async function syncInoreaderToNotion() {
         imageUrl = item.enclosure[0].href;
       }
 
+      // 处理时间戳，确保是数字类型
+      const publishedTimestamp = typeof item.published === 'string' 
+        ? parseInt(item.published, 10) 
+        : item.published;
+
       // 创建Notion页面
       await notion.pages.create({
         parent: { database_id: databaseId },
@@ -99,16 +111,18 @@ async function syncInoreaderToNotion() {
             ]
           },
           URL: {
-            url: item.canonical[0]?.href || item.alternate[0]?.href
+            url: articleUrl
           },
-          '来源': {  // 修正：中文属性名添加引号
+          '来源': {
             select: {
               name: item.origin?.title || '未知来源'
             }
           },
-          '收藏时间': {  // 修正：中文属性名添加引号
+          '收藏时间': {
             date: {
-              start: new Date(item.published * 1000).toISOString()
+              start: publishedTimestamp 
+                ? new Date(publishedTimestamp * 1000).toISOString()
+                : new Date().toISOString()
             }
           }
         },
@@ -144,7 +158,7 @@ async function syncInoreaderToNotion() {
         ]
       });
 
-      console.log(`成功导入: ${item.title}`);
+      console.log(`成功导入: ${item.title || '无标题'}`);
     }
 
     return {
@@ -163,7 +177,7 @@ export async function GET(request) {
   return await POST(request);
 }
 
-// 保留POST方法
+// 处理POST方法
 export async function POST(request) {
   try {
     const result = await syncInoreaderToNotion();
@@ -185,4 +199,3 @@ export async function POST(request) {
     });
   }
 }
-    
