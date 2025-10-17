@@ -1,7 +1,16 @@
 import { Redis } from '@upstash/redis';
 import { Client } from '@notionhq/client';
+import { NextRequest } from 'next/server';
+import type {
+  BlockObjectRequest,
+  CreatePageParameters,
+  DatabaseObjectResponse,
+  PageObjectResponse,
+  PartialPageObjectResponse,
+  PartialDatabaseObjectResponse
+} from '@notionhq/client/build/src/api-endpoints';
 
-// 类型定义
+// 类型定义（完全避免引用未导出的RichTextItemRequest）
 interface TokenData {
   accessToken: string;
   refreshToken: string;
@@ -143,7 +152,8 @@ async function refreshInoreaderToken(refreshToken: string): Promise<string> {
     return newTokenData.accessToken;
   } catch (error) {
     const duration = Date.now() - startTime;
-    console.error(`[${new Date().toISOString()}] [${functionId}] [refreshInoreaderToken] 执行失败，耗时${duration}ms，错误:`, error.stack || error.message);
+    const errorInstance = error as Error;
+    console.error(`[${new Date().toISOString()}] [${functionId}] [refreshInoreaderToken] 执行失败，耗时${duration}ms，错误: ${errorInstance.stack || errorInstance.message}`);
     throw error;
   }
 }
@@ -180,7 +190,8 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
         throw new Error('令牌数据结构无效');
       }
     } catch (parseError) {
-      const errorMsg = `解析令牌数据失败: ${parseError.message}`;
+      const errorInstance = parseError as Error;
+      const errorMsg = `解析令牌数据失败: ${errorInstance.message}`;
       console.error(`[${new Date().toISOString()}] [${syncId}] 错误: ${errorMsg}`);
       throw new Error(errorMsg);
     }
@@ -217,7 +228,8 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
           tokenData = JSON.parse(updatedTokenDataStr);
           console.log(`[${new Date().toISOString()}] [${syncId}] 已更新令牌数据，新有效期至: ${new Date(tokenData.expiresAt).toISOString()}`);
         } catch (e) {
-          console.warn(`[${new Date().toISOString()}] [${syncId}] 解析更新后的令牌数据失败: ${(e as Error).message}`);
+          const errorInstance = e as Error;
+          console.warn(`[${new Date().toISOString()}] [${syncId}] 解析更新后的令牌数据失败: ${errorInstance.message}`);
         }
       } else {
         console.warn(`[${new Date().toISOString()}] [${syncId}] 刷新后未获取到新的令牌数据`);
@@ -240,7 +252,8 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
       );
       console.log(`[${new Date().toISOString()}] [${syncId}] 拉取星标文章响应状态: ${starredItemsResponse.status}`);
     } catch (fetchError) {
-      const errorMsg = `拉取星标文章时网络错误: ${(fetchError as Error).message}`;
+      const errorInstance = fetchError as Error;
+      const errorMsg = `拉取星标文章时网络错误: ${errorInstance.message}`;
       console.error(`[${new Date().toISOString()}] [${syncId}] 错误: ${errorMsg}`);
       throw new Error(errorMsg);
     }
@@ -329,7 +342,12 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
 
       // 检查是否已存在相同URL的页面
       console.log(`[${new Date().toISOString()}] [${syncId}] 检查文章[${itemId}]在Notion中是否已存在: ${articleUrl.substring(0, 50)}...`);
-      let existingPages;
+      
+      // 定义查询结果类型（包含所有可能的返回类型）
+      let existingPages: {
+        results: (PageObjectResponse | DatabaseObjectResponse | PartialPageObjectResponse | PartialDatabaseObjectResponse)[];
+      };
+      
       try {
         existingPages = await notion.databases.query({
           database_id: databaseId,
@@ -342,13 +360,16 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
         });
         console.log(`[${new Date().toISOString()}] [${syncId}] Notion数据库查询完成，返回${existingPages.results.length}条结果`);
       } catch (queryError) {
-        console.error(`[${new Date().toISOString()}] [${syncId}] 检查文章[${itemId}]是否存在时出错:`, (queryError as Error).stack || (queryError as Error).message);
+        const errorInstance = queryError as Error;
+        console.error(`[${new Date().toISOString()}] [${syncId}] 检查文章[${itemId}]是否存在时出错: ${errorInstance.stack || errorInstance.message}`);
         skippedCount++;
         continue;
       }
 
       if (existingPages.results.length > 0) {
-        console.log(`[${new Date().toISOString()}] [${syncId}] 文章[${itemId}]已存在于Notion中（ID: ${existingPages.results[0].id.substring(0, 8)}...），跳过`);
+        // 安全获取已有页面ID
+        const existingPageId = existingPages.results[0].id.substring(0, 8);
+        console.log(`[${new Date().toISOString()}] [${syncId}] 文章[${itemId}]已存在于Notion中（ID: ${existingPageId}...），跳过`);
         skippedCount++;
         continue;
       }
@@ -371,7 +392,7 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
         console.log(`[${new Date().toISOString()}] [${syncId}] 文章[${itemId}]无图片`);
       }
 
-      // 处理时间戳，确保是数字类型并转换为正确的日期
+      // 处理时间戳
       let publishedDate: string;
       if (item.published) {
         console.log(`[${new Date().toISOString()}] [${syncId}] 原始发布时间戳: ${item.published} (类型: ${typeof item.published})`);
@@ -379,12 +400,10 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
           ? parseInt(item.published, 10) 
           : (typeof item.published === 'number' ? item.published : NaN);
         
-        // 检查时间戳有效性
         if (isNaN(publishedTimestamp) || publishedTimestamp <= 0) {
           console.warn(`[${new Date().toISOString()}] [${syncId}] 文章[${itemId}]的时间戳无效: ${item.published}`);
           publishedDate = new Date().toISOString();
         } else {
-          // Inoreader的时间戳是秒级，需要转换为毫秒
           publishedDate = new Date(publishedTimestamp * 1000).toISOString();
         }
       } else {
@@ -404,12 +423,47 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
           ? item.origin.title
           : '未知来源';
 
-        const pageData = {
+        // 构建页面内容块（完全避免使用未导出的RichText类型）
+        const children: BlockObjectRequest[] = [];
+        
+        // 添加图片块
+        if (typeof imageUrl === 'string' && imageUrl.trim() !== '') {
+          children.push({
+            object: 'block',
+            type: 'image',
+            image: {
+              type: 'external',
+              external: {
+                url: imageUrl
+              }
+            }
+          });
+        }
+        
+        // 添加段落块（使用基础对象结构）
+        children.push({
+          object: 'block',
+          type: 'paragraph',
+          paragraph: {
+            rich_text: [
+              {
+                type: 'text',
+                text: {
+                  content: content || '无摘要内容'
+                }
+              }
+            ]
+          }
+        });
+
+        // 页面数据（显式定义properties字段类型，避免联合类型歧义）
+        const pageData: CreatePageParameters = {
           parent: { database_id: databaseId },
           properties: {
             Name: {
               title: [
                 {
+                  type: 'text',
                   text: {
                     content: pageTitle
                   }
@@ -430,51 +484,39 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
               }
             }
           },
-          children: [
-            // 添加图片块（如果有图片）
-            ...(typeof imageUrl === 'string' && imageUrl.trim() !== ''
-              ? [
-                  {
-                    type: 'image',
-                    image: {
-                      type: 'external',
-                      external: {
-                        url: imageUrl
-                      }
-                    }
-                  }
-                ]
-              : []),
-            // 添加内容块
-            {
-              type: 'paragraph',
-              paragraph: {
-                rich_text: [
-                  {
-                    type: 'text',
-                    text: {
-                      content: content || '无摘要内容'
-                    }
-                  }
-                ]
-              }
-            }
-          ]
+          children: children
         };
         
-        console.log(`[${new Date().toISOString()}] [${syncId}] 准备创建页面数据: 标题=${pageData.properties.Name.title[0].text.content.substring(0, 30)}..., 来源=${pageData.properties.来源.select.name}`);
+        // 核心修复：通过类型断言明确properties字段的具体类型，解决联合类型推断问题
+        // 1. 处理"Name"字段（title类型）
+        const nameProp = pageData.properties.Name as {
+          title: Array<{ text: { content: string } }>;
+        };
+        const nameTitle = nameProp?.title?.[0]?.text?.content || '无标题';
+        const logTitle = nameTitle.substring(0, 30);
+        
+        // 2. 处理"来源"字段（select类型）
+        const sourceProp = pageData.properties['来源'] as {
+          select: { name: string };
+        };
+        const logSource = sourceProp?.select?.name || '未知来源';
+        
+        console.log(`[${new Date().toISOString()}] [${syncId}] 准备创建页面数据: 标题=${logTitle}..., 来源=${logSource}`);
+        
         const response = await notion.pages.create(pageData);
         
         console.log(`[${new Date().toISOString()}] [${syncId}] 文章[${itemId}]成功导入Notion，页面ID: ${response.id.substring(0, 8)}...`);
         importedCount++;
       } catch (createError) {
-        console.error(`[${new Date().toISOString()}] [${syncId}] 创建文章[${itemId}]的Notion页面失败:`, (createError as Error).stack || (createError as Error).message);
+        const errorInstance = createError as Error;
+        console.error(`[${new Date().toISOString()}] [${syncId}] 创建文章[${itemId}]的Notion页面失败: ${errorInstance.stack || errorInstance.message}`);
         skippedCount++;
       }
     }
 
     const duration = Date.now() - startTime;
     console.log(`[${new Date().toISOString()}] [${syncId}] [syncInoreaderToNotion] 同步任务完成，总耗时${duration}ms - 成功导入: ${importedCount}篇, 跳过: ${skippedCount}篇`);
+    
     return {
       success: true,
       message: `成功同步 ${importedCount} 篇文章到Notion，跳过 ${skippedCount} 篇`,
@@ -486,13 +528,14 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
     };
   } catch (error) {
     const duration = Date.now() - startTime;
-    console.error(`[${new Date().toISOString()}] [${syncId}] [syncInoreaderToNotion] 同步过程出错，总耗时${duration}ms:`, (error as Error).stack || (error as Error).message);
-    throw new Error(`同步失败: ${(error as Error).message}`);
+    const errorInstance = error as Error;
+    console.error(`[${new Date().toISOString()}] [${syncId}] [syncInoreaderToNotion] 同步过程出错，总耗时${duration}ms: ${errorInstance.stack || errorInstance.message}`);
+    throw new Error(`同步失败: ${errorInstance.message}`);
   }
 }
 
 // 支持GET方法
-export async function GET(request: Request): Promise<Response> {
+export async function GET(request: NextRequest): Promise<Response> {
   const requestId = `get_${Date.now().toString().slice(-6)}`;
   console.log(`[${new Date().toISOString()}] [${requestId}] [GET] 收到请求，URL: ${request.url}`);
   try {
@@ -509,10 +552,11 @@ export async function GET(request: Request): Promise<Response> {
       }
     });
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] [${requestId}] [GET] 请求处理失败:`, (error as Error).message);
+    const errorInstance = error as Error;
+    console.error(`[${new Date().toISOString()}] [${requestId}] [GET] 请求处理失败: ${errorInstance.message}`);
     return new Response(JSON.stringify({
       success: false,
-      message: (error as Error).message,
+      message: errorInstance.message,
       requestId: requestId
     }), {
       status: 500,
@@ -524,16 +568,16 @@ export async function GET(request: Request): Promise<Response> {
 }
 
 // 处理POST方法
-export async function POST(request: Request): Promise<Response> {
+export async function POST(request: NextRequest): Promise<Response> {
   const requestId = `post_${Date.now().toString().slice(-6)}`;
   console.log(`[${new Date().toISOString()}] [${requestId}] [POST] 收到请求，URL: ${request.url}`);
   
-  // 记录请求体（敏感信息会被截断）
   try {
     const requestBody = await request.clone().text();
     console.log(`[${new Date().toISOString()}] [${requestId}] 请求体前200字符: ${requestBody.substring(0, 200)}...`);
   } catch (e) {
-    console.log(`[${new Date().toISOString()}] [${requestId}] 无法读取请求体: ${(e as Error).message}`);
+    const errorInstance = e as Error;
+    console.log(`[${new Date().toISOString()}] [${requestId}] 无法读取请求体: ${errorInstance.message}`);
   }
   
   try {
@@ -550,10 +594,11 @@ export async function POST(request: Request): Promise<Response> {
       }
     });
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] [${requestId}] [POST] 请求处理失败:`, (error as Error).message);
+    const errorInstance = error as Error;
+    console.error(`[${new Date().toISOString()}] [${requestId}] [POST] 请求处理失败: ${errorInstance.message}`);
     return new Response(JSON.stringify({
       success: false,
-      message: (error as Error).message,
+      message: errorInstance.message,
       requestId: requestId
     }), {
       status: 500,
