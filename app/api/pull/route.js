@@ -1,6 +1,39 @@
 import { Redis } from '@upstash/redis';
 import { Client } from '@notionhq/client';
 
+// 类型定义
+interface TokenData {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+}
+
+interface InoreaderItem {
+  id: string;
+  title?: string;
+  canonical?: Array<{ href: string }>;
+  alternate?: Array<{ href: string }>;
+  summary?: { content: string };
+  enclosure?: Array<{ href: string }>;
+  published?: number | string;
+  origin?: { title: string };
+}
+
+interface InoreaderResponse {
+  items?: InoreaderItem[];
+  [key: string]: any;
+}
+
+interface SyncResult {
+  success: boolean;
+  message: string;
+  imported: number;
+  skipped: number;
+  totalProcessed: number;
+  duration: number;
+  syncId: string;
+}
+
 // 初始化Redis客户端
 console.log(`[${new Date().toISOString()}] [初始化] 开始初始化Redis客户端`);
 const redis = new Redis({
@@ -17,7 +50,13 @@ const notion = new Client({
 console.log(`[${new Date().toISOString()}] [初始化] Notion客户端初始化完成`);
 
 // 刷新Inoreader令牌
-async function refreshInoreaderToken(refreshToken) {
+async function refreshInoreaderToken(refreshToken: string): Promise<string> {
+  if (typeof refreshToken !== 'string' || refreshToken.trim() === '') {
+    const errorMsg = '无效的刷新令牌: 必须提供非空字符串';
+    console.error(`[${new Date().toISOString()}] [refreshInoreaderToken] 参数错误: ${errorMsg}`);
+    throw new Error(errorMsg);
+  }
+
   const startTime = Date.now();
   const functionId = `refresh_${Date.now().toString().slice(-6)}`;
   console.log(`[${new Date().toISOString()}] [${functionId}] [refreshInoreaderToken] 开始执行令牌刷新`);
@@ -27,11 +66,18 @@ async function refreshInoreaderToken(refreshToken) {
     const clientId = process.env.INOREADER_CLIENT_ID;
     const clientSecret = process.env.INOREADER_CLIENT_SECRET;
     
-    if (!clientId || !clientSecret) {
-      const errorMsg = '未配置Inoreader客户端ID或密钥';
+    if (typeof clientId !== 'string' || clientId.trim() === '') {
+      const errorMsg = '未配置有效的Inoreader客户端ID';
       console.error(`[${new Date().toISOString()}] [${functionId}] [refreshInoreaderToken] 错误: ${errorMsg}`);
       throw new Error(errorMsg);
     }
+    
+    if (typeof clientSecret !== 'string' || clientSecret.trim() === '') {
+      const errorMsg = '未配置有效的Inoreader客户端密钥';
+      console.error(`[${new Date().toISOString()}] [${functionId}] [refreshInoreaderToken] 错误: ${errorMsg}`);
+      throw new Error(errorMsg);
+    }
+    
     console.log(`[${new Date().toISOString()}] [${functionId}] 环境变量配置检查通过`);
     
     console.log(`[${new Date().toISOString()}] [${functionId}] 准备向Inoreader发送令牌刷新请求`);
@@ -60,15 +106,28 @@ async function refreshInoreaderToken(refreshToken) {
       throw new Error(errorMsg);
     }
     
-    const tokenData = await response.json();
+    const tokenData: any = await response.json();
     console.log(`[${new Date().toISOString()}] [${functionId}] 成功解析令牌数据，包含字段: ${Object.keys(tokenData).join(', ')}`);
+    
+    // 验证令牌响应结构
+    if (typeof tokenData.access_token !== 'string') {
+      const errorMsg = 'Inoreader返回的令牌数据不包含有效的access_token';
+      console.error(`[${new Date().toISOString()}] [${functionId}] [refreshInoreaderToken] 错误: ${errorMsg}`);
+      throw new Error(errorMsg);
+    }
+    
+    if (typeof tokenData.expires_in !== 'number' || tokenData.expires_in <= 0) {
+      const errorMsg = `Inoreader返回的有效期无效: ${tokenData.expires_in}`;
+      console.error(`[${new Date().toISOString()}] [${functionId}] [refreshInoreaderToken] 错误: ${errorMsg}`);
+      throw new Error(errorMsg);
+    }
     
     // 计算过期时间（当前时间 + 有效期秒数）
     const expiresAt = Date.now() + (tokenData.expires_in * 1000);
     console.log(`[${new Date().toISOString()}] [${functionId}] 计算令牌过期时间: 有效期${tokenData.expires_in}秒，过期时间${new Date(expiresAt).toISOString()}`);
     
     // 保存新的令牌数据
-    const newTokenData = {
+    const newTokenData: TokenData = {
       accessToken: tokenData.access_token,
       refreshToken: tokenData.refresh_token || refreshToken,
       expiresAt: expiresAt
@@ -90,7 +149,7 @@ async function refreshInoreaderToken(refreshToken) {
 }
 
 // 处理Inoreader和Notion同步的核心函数
-async function syncInoreaderToNotion() {
+async function syncInoreaderToNotion(): Promise<SyncResult> {
   const startTime = Date.now();
   const syncId = `sync_${Date.now().toString().slice(-6)}`;
   console.log(`[${new Date().toISOString()}] [${syncId}] [syncInoreaderToNotion] 开始执行同步任务`);
@@ -103,13 +162,29 @@ async function syncInoreaderToNotion() {
     const tokenDataStr = await redis.get('inoreader_tokens');
     console.log(`[${new Date().toISOString()}] [${syncId}] Redis查询完成，${tokenDataStr ? '已获取' : '未获取'}令牌数据`);
     
-    if (!tokenDataStr) {
-      const errorMsg = '未找到Inoreader令牌，请先完成授权';
+    if (!tokenDataStr || typeof tokenDataStr !== 'string') {
+      const errorMsg = '未找到有效的Inoreader令牌数据，请先完成授权';
       console.error(`[${new Date().toISOString()}] [${syncId}] 错误: ${errorMsg}`);
       throw new Error(errorMsg);
     }
     
-    let tokenData = JSON.parse(tokenDataStr);
+    let tokenData: TokenData;
+    try {
+      tokenData = JSON.parse(tokenDataStr);
+      // 验证令牌数据结构
+      if (
+        typeof tokenData.accessToken !== 'string' || 
+        typeof tokenData.refreshToken !== 'string' || 
+        typeof tokenData.expiresAt !== 'number'
+      ) {
+        throw new Error('令牌数据结构无效');
+      }
+    } catch (parseError) {
+      const errorMsg = `解析令牌数据失败: ${parseError.message}`;
+      console.error(`[${new Date().toISOString()}] [${syncId}] 错误: ${errorMsg}`);
+      throw new Error(errorMsg);
+    }
+    
     let { accessToken, refreshToken } = tokenData;
     console.log(`[${new Date().toISOString()}] [${syncId}] 成功解析令牌数据，当前令牌有效期至: ${new Date(tokenData.expiresAt).toISOString()}`);
     console.log(`[${new Date().toISOString()}] [${syncId}] 访问令牌前8位: ${accessToken.substring(0, 8)}...`);
@@ -123,8 +198,8 @@ async function syncInoreaderToNotion() {
     if (isExpired) {
       console.log(`[${new Date().toISOString()}] [${syncId}] 令牌已过期，需要刷新`);
       
-      if (!refreshToken) {
-        const errorMsg = '没有刷新令牌，无法刷新，请重新授权';
+      if (!refreshToken || typeof refreshToken !== 'string') {
+        const errorMsg = '没有有效的刷新令牌，无法刷新，请重新授权';
         console.error(`[${new Date().toISOString()}] [${syncId}] 错误: ${errorMsg}`);
         throw new Error(errorMsg);
       }
@@ -137,9 +212,13 @@ async function syncInoreaderToNotion() {
       console.log(`[${new Date().toISOString()}] [${syncId}] 从Redis获取更新后的令牌数据`);
       const updatedTokenDataStr = await redis.get('inoreader_tokens');
       
-      if (updatedTokenDataStr) {
-        tokenData = JSON.parse(updatedTokenDataStr);
-        console.log(`[${new Date().toISOString()}] [${syncId}] 已更新令牌数据，新有效期至: ${new Date(tokenData.expiresAt).toISOString()}`);
+      if (updatedTokenDataStr && typeof updatedTokenDataStr === 'string') {
+        try {
+          tokenData = JSON.parse(updatedTokenDataStr);
+          console.log(`[${new Date().toISOString()}] [${syncId}] 已更新令牌数据，新有效期至: ${new Date(tokenData.expiresAt).toISOString()}`);
+        } catch (e) {
+          console.warn(`[${new Date().toISOString()}] [${syncId}] 解析更新后的令牌数据失败: ${(e as Error).message}`);
+        }
       } else {
         console.warn(`[${new Date().toISOString()}] [${syncId}] 刷新后未获取到新的令牌数据`);
       }
@@ -149,7 +228,7 @@ async function syncInoreaderToNotion() {
     console.log(`[${new Date().toISOString()}] [${syncId}] 步骤2/3: 拉取Inoreader星标文章`);
     console.log(`[${new Date().toISOString()}] [${syncId}] 请求URL: https://www.inoreader.com/reader/api/0/stream/contents/user/-/state/com.google/starred`);
     
-    let starredItemsResponse;
+    let starredItemsResponse: Response;
     try {
       starredItemsResponse = await fetch(
         'https://www.inoreader.com/reader/api/0/stream/contents/user/-/state/com.google/starred',
@@ -161,7 +240,7 @@ async function syncInoreaderToNotion() {
       );
       console.log(`[${new Date().toISOString()}] [${syncId}] 拉取星标文章响应状态: ${starredItemsResponse.status}`);
     } catch (fetchError) {
-      const errorMsg = `拉取星标文章时网络错误: ${fetchError.message}`;
+      const errorMsg = `拉取星标文章时网络错误: ${(fetchError as Error).message}`;
       console.error(`[${new Date().toISOString()}] [${syncId}] 错误: ${errorMsg}`);
       throw new Error(errorMsg);
     }
@@ -199,10 +278,10 @@ async function syncInoreaderToNotion() {
       }
     }
 
-    const starredData = await starredItemsResponse.json();
+    const starredData: InoreaderResponse = await starredItemsResponse.json();
     console.log(`[${new Date().toISOString()}] [${syncId}] 成功解析星标文章数据，包含字段: ${Object.keys(starredData).join(', ')}`);
     
-    const items = starredData.items || [];
+    const items = Array.isArray(starredData.items) ? starredData.items : [];
     console.log(`[${new Date().toISOString()}] [${syncId}] 成功拉取到${items.length}篇星标文章`);
     
     // 限制导入数量，避免一次性导入过多
@@ -214,8 +293,8 @@ async function syncInoreaderToNotion() {
     console.log(`[${new Date().toISOString()}] [${syncId}] 步骤3/3: 同步到Notion数据库`);
     const databaseId = process.env.NOTION_DATABASE_ID;
     
-    if (!databaseId) {
-      const errorMsg = '未配置Notion数据库ID';
+    if (typeof databaseId !== 'string' || databaseId.trim() === '') {
+      const errorMsg = '未配置有效的Notion数据库ID';
       console.error(`[${new Date().toISOString()}] [${syncId}] 错误: ${errorMsg}`);
       throw new Error(errorMsg);
     }
@@ -225,14 +304,24 @@ async function syncInoreaderToNotion() {
     let skippedCount = 0;
 
     for (const item of itemsToImport) {
-      const itemId = item.id || '未知ID';
+      // 验证item基本结构
+      if (typeof item !== 'object' || item === null) {
+        console.warn(`[${new Date().toISOString()}] [${syncId}] 无效的文章数据结构，跳过处理`);
+        skippedCount++;
+        continue;
+      }
+      
+      const itemId = typeof item.id === 'string' ? item.id : '未知ID';
       console.log(`[${new Date().toISOString()}] [${syncId}] 开始处理文章 [ID: ${itemId}]，标题: ${item.title || '无标题'}`);
       
       // 获取文章URL，增加容错处理
-      const articleUrl = item.canonical?.[0]?.href || item.alternate?.[0]?.href;
+      const articleUrl = 
+        (Array.isArray(item.canonical) && item.canonical[0]?.href) || 
+        (Array.isArray(item.alternate) && item.alternate[0]?.href);
+      
       console.log(`[${new Date().toISOString()}] [${syncId}] 解析文章URL: canonical=${item.canonical?.[0]?.href || '无'}, alternate=${item.alternate?.[0]?.href || '无'}, 最终使用=${articleUrl || '无'}`);
       
-      if (!articleUrl) {
+      if (!articleUrl || typeof articleUrl !== 'string') {
         console.log(`[${new Date().toISOString()}] [${syncId}] 文章[${itemId}]无有效URL，跳过处理`);
         skippedCount++;
         continue;
@@ -253,7 +342,7 @@ async function syncInoreaderToNotion() {
         });
         console.log(`[${new Date().toISOString()}] [${syncId}] Notion数据库查询完成，返回${existingPages.results.length}条结果`);
       } catch (queryError) {
-        console.error(`[${new Date().toISOString()}] [${syncId}] 检查文章[${itemId}]是否存在时出错:`, queryError.stack || queryError.message);
+        console.error(`[${new Date().toISOString()}] [${syncId}] 检查文章[${itemId}]是否存在时出错:`, (queryError as Error).stack || (queryError as Error).message);
         skippedCount++;
         continue;
       }
@@ -266,7 +355,7 @@ async function syncInoreaderToNotion() {
 
       // 提取文章内容
       let content = '';
-      if (item.summary?.content) {
+      if (item.summary?.content && typeof item.summary.content === 'string') {
         content = item.summary.content;
         console.log(`[${new Date().toISOString()}] [${syncId}] 提取到文章[${itemId}]摘要，长度: ${content.length}字符，前50字符: ${content.substring(0, 50)}...`);
       } else {
@@ -275,7 +364,7 @@ async function syncInoreaderToNotion() {
 
       // 提取第一张图片URL
       let imageUrl = '';
-      if (item.enclosure?.length) {
+      if (Array.isArray(item.enclosure) && item.enclosure[0]?.href) {
         imageUrl = item.enclosure[0].href;
         console.log(`[${new Date().toISOString()}] [${syncId}] 提取到文章[${itemId}]图片URL: ${imageUrl.substring(0, 50)}...`);
       } else {
@@ -283,12 +372,12 @@ async function syncInoreaderToNotion() {
       }
 
       // 处理时间戳，确保是数字类型并转换为正确的日期
-      let publishedDate;
+      let publishedDate: string;
       if (item.published) {
         console.log(`[${new Date().toISOString()}] [${syncId}] 原始发布时间戳: ${item.published} (类型: ${typeof item.published})`);
         const publishedTimestamp = typeof item.published === 'string' 
           ? parseInt(item.published, 10) 
-          : item.published;
+          : (typeof item.published === 'number' ? item.published : NaN);
         
         // 检查时间戳有效性
         if (isNaN(publishedTimestamp) || publishedTimestamp <= 0) {
@@ -307,6 +396,14 @@ async function syncInoreaderToNotion() {
       // 创建Notion页面
       console.log(`[${new Date().toISOString()}] [${syncId}] 开始创建文章[${itemId}]的Notion页面`);
       try {
+        const pageTitle = typeof item.title === 'string' && item.title.trim() !== '' 
+          ? item.title 
+          : '无标题文章';
+          
+        const sourceName = item.origin?.title && typeof item.origin.title === 'string'
+          ? item.origin.title
+          : '未知来源';
+
         const pageData = {
           parent: { database_id: databaseId },
           properties: {
@@ -314,7 +411,7 @@ async function syncInoreaderToNotion() {
               title: [
                 {
                   text: {
-                    content: item.title || '无标题文章'
+                    content: pageTitle
                   }
                 }
               ]
@@ -324,7 +421,7 @@ async function syncInoreaderToNotion() {
             },
             '来源': {
               select: {
-                name: item.origin?.title || '未知来源'
+                name: sourceName
               }
             },
             '收藏时间': {
@@ -335,7 +432,7 @@ async function syncInoreaderToNotion() {
           },
           children: [
             // 添加图片块（如果有图片）
-            ...(imageUrl
+            ...(typeof imageUrl === 'string' && imageUrl.trim() !== ''
               ? [
                   {
                     type: 'image',
@@ -371,7 +468,7 @@ async function syncInoreaderToNotion() {
         console.log(`[${new Date().toISOString()}] [${syncId}] 文章[${itemId}]成功导入Notion，页面ID: ${response.id.substring(0, 8)}...`);
         importedCount++;
       } catch (createError) {
-        console.error(`[${new Date().toISOString()}] [${syncId}] 创建文章[${itemId}]的Notion页面失败:`, createError.stack || createError.message);
+        console.error(`[${new Date().toISOString()}] [${syncId}] 创建文章[${itemId}]的Notion页面失败:`, (createError as Error).stack || (createError as Error).message);
         skippedCount++;
       }
     }
@@ -389,13 +486,13 @@ async function syncInoreaderToNotion() {
     };
   } catch (error) {
     const duration = Date.now() - startTime;
-    console.error(`[${new Date().toISOString()}] [${syncId}] [syncInoreaderToNotion] 同步过程出错，总耗时${duration}ms:`, error.stack || error.message);
-    throw new Error(`同步失败: ${error.message}`);
+    console.error(`[${new Date().toISOString()}] [${syncId}] [syncInoreaderToNotion] 同步过程出错，总耗时${duration}ms:`, (error as Error).stack || (error as Error).message);
+    throw new Error(`同步失败: ${(error as Error).message}`);
   }
 }
 
 // 支持GET方法
-export async function GET(request) {
+export async function GET(request: Request): Promise<Response> {
   const requestId = `get_${Date.now().toString().slice(-6)}`;
   console.log(`[${new Date().toISOString()}] [${requestId}] [GET] 收到请求，URL: ${request.url}`);
   try {
@@ -412,10 +509,10 @@ export async function GET(request) {
       }
     });
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] [${requestId}] [GET] 请求处理失败:`, error.message);
+    console.error(`[${new Date().toISOString()}] [${requestId}] [GET] 请求处理失败:`, (error as Error).message);
     return new Response(JSON.stringify({
       success: false,
-      message: error.message,
+      message: (error as Error).message,
       requestId: requestId
     }), {
       status: 500,
@@ -427,7 +524,7 @@ export async function GET(request) {
 }
 
 // 处理POST方法
-export async function POST(request) {
+export async function POST(request: Request): Promise<Response> {
   const requestId = `post_${Date.now().toString().slice(-6)}`;
   console.log(`[${new Date().toISOString()}] [${requestId}] [POST] 收到请求，URL: ${request.url}`);
   
@@ -436,7 +533,7 @@ export async function POST(request) {
     const requestBody = await request.clone().text();
     console.log(`[${new Date().toISOString()}] [${requestId}] 请求体前200字符: ${requestBody.substring(0, 200)}...`);
   } catch (e) {
-    console.log(`[${new Date().toISOString()}] [${requestId}] 无法读取请求体: ${e.message}`);
+    console.log(`[${new Date().toISOString()}] [${requestId}] 无法读取请求体: ${(e as Error).message}`);
   }
   
   try {
@@ -453,10 +550,10 @@ export async function POST(request) {
       }
     });
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] [${requestId}] [POST] 请求处理失败:`, error.message);
+    console.error(`[${new Date().toISOString()}] [${requestId}] [POST] 请求处理失败:`, (error as Error).message);
     return new Response(JSON.stringify({
       success: false,
-      message: error.message,
+      message: (error as Error).message,
       requestId: requestId
     }), {
       status: 500,
