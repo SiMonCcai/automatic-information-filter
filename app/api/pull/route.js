@@ -95,9 +95,9 @@ async function syncInoreaderToNotion() {
       }
     }
 
-    // 2. 从Inoreader拉取星标文章
+    // 2. 从Inoreader拉取星标文章（使用let声明，允许重新赋值）
     console.log(`[${new Date().toISOString()}] 开始从Inoreader拉取星标文章`);
-    const starredItemsResponse = await fetch(
+    let starredItemsResponse = await fetch(
       'https://www.inoreader.com/reader/api/0/stream/contents/user/-/state/com.google/starred',
       {
         headers: {
@@ -127,7 +127,7 @@ async function syncInoreaderToNotion() {
           throw new Error(`拉取Inoreader数据失败: ${retryResponse.status} ${retryResponse.statusText}`);
         }
         
-        starredItemsResponse = retryResponse;
+        starredItemsResponse = retryResponse; // 现在可以正常赋值，因为使用了let声明
       } else {
         console.error(`[${new Date().toISOString()}] 拉取Inoreader数据失败: ${starredItemsResponse.status} ${starredItemsResponse.statusText}`);
         throw new Error(`拉取Inoreader数据失败: ${starredItemsResponse.status} ${starredItemsResponse.statusText}`);
@@ -318,3 +318,4 @@ export async function POST(request) {
     });
   }
 }
+    
