@@ -12,6 +12,53 @@ const notion = new Client({
   auth: process.env.NOTION_TOKEN,
 });
 
+// 刷新Inoreader令牌
+async function refreshInoreaderToken(refreshToken) {
+  console.log(`[${new Date().toISOString()}] 尝试刷新Inoreader令牌`);
+  
+  const clientId = process.env.INOREADER_CLIENT_ID;
+  const clientSecret = process.env.INOREADER_CLIENT_SECRET;
+  
+  if (!clientId || !clientSecret) {
+    throw new Error('未配置Inoreader客户端ID或密钥');
+  }
+  
+  const response = await fetch('https://www.inoreader.com/oauth2/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken
+    })
+  });
+  
+  if (!response.ok) {
+    console.error(`[${new Date().toISOString()}] 令牌刷新失败: ${response.status} ${response.statusText}`);
+    throw new Error(`令牌刷新失败: ${response.status} ${response.statusText}`);
+  }
+  
+  const tokenData = await response.json();
+  
+  // 计算过期时间（当前时间 + 有效期秒数）
+  const expiresAt = Date.now() + (tokenData.expires_in * 1000);
+  
+  // 保存新的令牌数据
+  const newTokenData = {
+    accessToken: tokenData.access_token,
+    refreshToken: tokenData.refresh_token || refreshToken, // 如果返回新的refresh_token则使用，否则保留旧的
+    expiresAt: expiresAt
+  };
+  
+  await redis.set('inoreader_tokens', JSON.stringify(newTokenData));
+  console.log(`[${new Date().toISOString()}] 令牌刷新成功，新令牌有效期至: ${new Date(expiresAt).toISOString()}`);
+  
+  return newTokenData.accessToken;
+}
+
 // 处理Inoreader和Notion同步的核心函数
 async function syncInoreaderToNotion() {
   console.log(`[${new Date().toISOString()}] 开始执行Inoreader到Notion的同步任务`);
@@ -26,14 +73,26 @@ async function syncInoreaderToNotion() {
       throw new Error('未找到Inoreader令牌，请先完成授权');
     }
     
-    const tokenData = JSON.parse(tokenDataStr);
-    const { accessToken } = tokenData;
+    let tokenData = JSON.parse(tokenDataStr);
+    let { accessToken, refreshToken } = tokenData;
     console.log(`[${new Date().toISOString()}] 成功获取Inoreader令牌`);
     
-    // 检查令牌是否过期
+    // 检查令牌是否过期，如果过期则尝试刷新
     if (Date.now() > tokenData.expiresAt) {
-      console.error(`[${new Date().toISOString()}] Inoreader令牌已过期，过期时间: ${new Date(tokenData.expiresAt).toISOString()}`);
-      throw new Error('Inoreader令牌已过期，请重新授权');
+      console.log(`[${new Date().toISOString()}] Inoreader令牌已过期，尝试刷新，过期时间: ${new Date(tokenData.expiresAt).toISOString()}`);
+      
+      if (!refreshToken) {
+        throw new Error('没有刷新令牌，无法刷新，请重新授权');
+      }
+      
+      // 尝试刷新令牌
+      accessToken = await refreshInoreaderToken(refreshToken);
+      
+      // 重新获取更新后的令牌数据
+      const updatedTokenDataStr = await redis.get('inoreader_tokens');
+      if (updatedTokenDataStr) {
+        tokenData = JSON.parse(updatedTokenDataStr);
+      }
     }
 
     // 2. 从Inoreader拉取星标文章
@@ -48,8 +107,31 @@ async function syncInoreaderToNotion() {
     );
 
     if (!starredItemsResponse.ok) {
-      console.error(`[${new Date().toISOString()}] 拉取Inoreader数据失败: ${starredItemsResponse.status} ${starredItemsResponse.statusText}`);
-      throw new Error(`拉取Inoreader数据失败: ${starredItemsResponse.status} ${starredItemsResponse.statusText}`);
+      // 如果是401错误，可能是令牌无效，尝试刷新后再试一次
+      if (starredItemsResponse.status === 401 && refreshToken) {
+        console.error(`[${new Date().toISOString()}] 令牌可能无效，尝试刷新后重试`);
+        accessToken = await refreshInoreaderToken(refreshToken);
+        
+        // 重新尝试拉取数据
+        const retryResponse = await fetch(
+          'https://www.inoreader.com/reader/api/0/stream/contents/user/-/state/com.google/starred',
+          {
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+            },
+          }
+        );
+        
+        if (!retryResponse.ok) {
+          console.error(`[${new Date().toISOString()}] 刷新令牌后拉取Inoreader数据仍失败: ${retryResponse.status} ${retryResponse.statusText}`);
+          throw new Error(`拉取Inoreader数据失败: ${retryResponse.status} ${retryResponse.statusText}`);
+        }
+        
+        starredItemsResponse = retryResponse;
+      } else {
+        console.error(`[${new Date().toISOString()}] 拉取Inoreader数据失败: ${starredItemsResponse.status} ${starredItemsResponse.statusText}`);
+        throw new Error(`拉取Inoreader数据失败: ${starredItemsResponse.status} ${starredItemsResponse.statusText}`);
+      }
     }
 
     const starredData = await starredItemsResponse.json();
@@ -67,7 +149,7 @@ async function syncInoreaderToNotion() {
       console.error(`[${new Date().toISOString()}] 未配置Notion数据库ID`);
       throw new Error('未配置Notion数据库ID');
     }
-    console.log(`[${new Date().toISOString()}] 准备同步到Notion数据库，数据库ID: ${databaseId.substring(0, 8)}...`); // 只显示部分ID，保护敏感信息
+    console.log(`[${new Date().toISOString()}] 准备同步到Notion数据库，数据库ID: ${databaseId.substring(0, 8)}...`);
 
     let importedCount = 0;
     let skippedCount = 0;
