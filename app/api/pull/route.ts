@@ -2,7 +2,7 @@ import { Redis } from '@upstash/redis';
 import { Client } from '@notionhq/client';
 import { NextRequest } from 'next/server';
 import type {
-  BlockObjectRequest, // 仅保留导出的联合类型
+  BlockObjectRequest,
   CreatePageParameters,
   DatabaseObjectResponse,
   PageObjectResponse,
@@ -129,7 +129,9 @@ async function refreshInoreaderToken(refreshToken: string): Promise<string> {
     
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '无法获取错误详情');
-      const errorMsg = `令牌刷新失败: ${response.status} ${response.statusText}，响应内容: ${errorBody.substring(0, 200)}`;
+      // 修复：严格检查errorBody是否为字符串
+      const safeErrorBody = typeof errorBody === 'string' ? errorBody.substring(0, 200) : '无效响应内容';
+      const errorMsg = `令牌刷新失败: ${response.status} ${response.statusText}，响应内容: ${safeErrorBody}`;
       console.error(`[${new Date().toISOString()}] [${functionId}] [refreshInoreaderToken] 错误: ${errorMsg}`);
       throw new Error(errorMsg);
     }
@@ -184,10 +186,18 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
     console.log(`[${new Date().toISOString()}] [${syncId}] 步骤1/3: 获取Inoreader令牌`);
     let tokenDataStr: string | null = await redis.get('inoreader_tokens'); // 显式声明类型
     
-    // 详细日志：打印读取到的原始数据状态（空值兜底 + 类型安全）
-    const logData = tokenDataStr 
-      ? `长度=${tokenDataStr.length}，前10字符=${tokenDataStr.substring(0, 10)}...` 
-      : '值为 null';
+    // 详细日志：打印读取到的原始数据状态（修复：严格检查字符串类型）
+    let logData: string;
+    if (tokenDataStr) {
+      if (typeof tokenDataStr === 'string') {
+        logData = `长度=${tokenDataStr.length}，前10字符=${tokenDataStr.substring(0, 10)}...`;
+      } else {
+        logData = `数据类型错误，实际类型: ${typeof tokenDataStr}`;
+        console.error(`[${new Date().toISOString()}] [${syncId}] 令牌数据类型错误，非字符串`);
+      }
+    } else {
+      logData = '值为 null';
+    }
     console.log(`[${new Date().toISOString()}] [${syncId}] 从Redis读取令牌数据: ${logData}`);
     
     if (!tokenDataStr || typeof tokenDataStr !== 'string') {
@@ -223,7 +233,9 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
       console.log(`[${new Date().toISOString()}] [${syncId}] 令牌数据解析成功，有效期至: ${new Date(tokenData.expiresAt).toISOString()}`);
     } catch (parseError) {
       const errorInstance = parseError as Error;
-      throw new Error(`解析令牌数据失败: ${errorInstance.message}（原始数据前50字符: ${tokenDataStr.substring(0, 50)}...）`);
+      // 修复：严格检查tokenDataStr是否为字符串
+      const safeTokenData = typeof tokenDataStr === 'string' ? tokenDataStr.substring(0, 50) : '无效字符串';
+      throw new Error(`解析令牌数据失败: ${errorInstance.message}（原始数据前50字符: ${safeTokenData}...）`);
     }
     
     // 检查令牌是否过期
@@ -269,11 +281,15 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
         
         if (!starredItemsResponse.ok) {
           const errorBody = await starredItemsResponse.text().catch(() => '无内容');
-          throw new Error(`刷新令牌后仍失败: ${starredItemsResponse.status}，内容: ${errorBody.substring(0, 200)}`);
+          // 修复：严格检查errorBody是否为字符串
+          const safeErrorBody = typeof errorBody === 'string' ? errorBody.substring(0, 200) : '无效响应内容';
+          throw new Error(`刷新令牌后仍失败: ${starredItemsResponse.status}，内容: ${safeErrorBody}`);
         }
       } else {
         const errorBody = await starredItemsResponse.text().catch(() => '无内容');
-        throw new Error(`拉取文章失败: ${starredItemsResponse.status}，内容: ${errorBody.substring(0, 200)}`);
+        // 修复：严格检查errorBody是否为字符串
+        const safeErrorBody = typeof errorBody === 'string' ? errorBody.substring(0, 200) : '无效响应内容';
+        throw new Error(`拉取文章失败: ${starredItemsResponse.status}，内容: ${safeErrorBody}`);
       }
     }
 
@@ -389,9 +405,17 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
           ]
         };
 
-        // 显式类型断言解决属性访问错误
+        // 显式类型断言解决属性访问错误（修复：严格检查字符串类型）
         const nameProp = pageData.properties.Name as { title: Array<{ text: { content: string } }> };
-        const logTitle = nameProp.title[0]?.text?.content?.substring(0, 30) || '无标题';
+        let logTitle: string;
+        const rawTitle = nameProp.title[0]?.text?.content;
+        if (typeof rawTitle === 'string') {
+          logTitle = rawTitle.substring(0, 30) || '无标题';
+        } else {
+          logTitle = '无标题（标题非字符串）';
+          console.warn(`[${new Date().toISOString()}] [${syncId}] 文章标题非字符串类型: ${typeof rawTitle}`);
+        }
+
         const sourceProp = pageData.properties['来源'] as { select: { name: string } };
         const logSource = sourceProp.select.name || '未知来源';
         console.log(`[${new Date().toISOString()}] [${syncId}] 创建页面: 标题=${logTitle}..., 来源=${logSource}`);
@@ -436,10 +460,14 @@ export async function GET(request: NextRequest): Promise<Response> {
       headers: { 'Content-Type': 'application/json' }
     });
   } catch (error) {
-    const errorMsg = (error as Error).message;
+    const errorObj = error as Error;
+    const errorMsg = errorObj.message;
+    const errorStack = errorObj.stack || '无堆栈信息';
+    console.error(`[${new Date().toISOString()}] [${requestId}] 错误详情: ${errorMsg}\n${errorStack}`);
     return new Response(JSON.stringify({
       success: false,
       message: errorMsg,
+      stack: errorStack,
       requestId: requestId
     }), {
       status: 500,
@@ -459,10 +487,14 @@ export async function POST(request: NextRequest): Promise<Response> {
       headers: { 'Content-Type': 'application/json' }
     });
   } catch (error) {
-    const errorMsg = (error as Error).message;
+    const errorObj = error as Error;
+    const errorMsg = errorObj.message;
+    const errorStack = errorObj.stack || '无堆栈信息';
+    console.error(`[${new Date().toISOString()}] [${requestId}] 错误详情: ${errorMsg}\n${errorStack}`);
     return new Response(JSON.stringify({
       success: false,
       message: errorMsg,
+      stack: errorStack,
       requestId: requestId
     }), {
       status: 500,
