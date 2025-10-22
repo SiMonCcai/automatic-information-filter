@@ -3,6 +3,7 @@
 import { Redis } from '@upstash/redis';
 import { Client } from '@notionhq/client';
 import { NextRequest } from 'next/server';
+import { convert } from 'html-to-text'; // <-- 1. 引入新安装的库
 import type {
   CreatePageParameters,
 } from '@notionhq/client/build/src/api-endpoints';
@@ -13,7 +14,6 @@ interface TokenData {
   refreshToken: string;
   expiresAt: number;
 }
-
 interface InoreaderItem {
   id: string;
   title?: string;
@@ -22,11 +22,9 @@ interface InoreaderItem {
   summary?: { content: string };
   origin?: { title: string };
 }
-
 interface InoreaderResponse {
   items?: InoreaderItem[];
 }
-
 interface SyncResult {
   success: boolean;
   message: string;
@@ -39,55 +37,72 @@ const redis = new Redis({
   url: process.env.KV_REST_API_URL!,
   token: process.env.KV_REST_API_TOKEN!,
 });
-
 const notion = new Client({
   auth: process.env.NOTION_TOKEN,
 });
 
+// --- 新增的 HTML 清洗函数 ---
+/**
+ * 将HTML字符串转换为纯文本
+ * @param html - 包含HTML标签的字符串
+ * @returns 清理后的纯文本字符串
+ */
+function cleanHtmlContent(html: string | undefined | null): string {
+  if (!html) {
+    return '';
+  }
+  return convert(html, {
+    wordwrap: false, // 不自动换行
+    selectors: [
+      { selector: 'img', format: 'skip' }, // 忽略所有图片
+      { selector: 'a', options: { ignoreHref: true } }, // 保留链接文本，但丢弃链接地址
+    ],
+  });
+}
+
+
 // --- refreshInoreaderToken 函数 (保持不变) ---
 async function refreshInoreaderToken(refreshToken: string): Promise<string> {
-  const functionId = `refresh_${Date.now().toString().slice(-6)}`;
-  console.log(`[${new Date().toISOString()}] [${functionId}] 开始刷新令牌`);
-  try {
-    const clientId = process.env.INOREADER_CLIENT_ID;
-    const clientSecret = process.env.INOREADER_CLIENT_SECRET;
-    if (!clientId || !clientSecret) {
-      throw new Error('Inoreader 客户端ID或密钥未配置');
+    // ... 此函数代码无需修改，保持原样 ...
+    const functionId = `refresh_${Date.now().toString().slice(-6)}`;
+    console.log(`[${new Date().toISOString()}] [${functionId}] 开始刷新令牌`);
+    try {
+        const clientId = process.env.INOREADER_CLIENT_ID;
+        const clientSecret = process.env.INOREADER_CLIENT_SECRET;
+        if (!clientId || !clientSecret) {
+            throw new Error('Inoreader 客户端ID或密钥未配置');
+        }
+        const response = await fetch('https://www.inoreader.com/oauth2/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                client_id: clientId,
+                client_secret: clientSecret,
+                grant_type: 'refresh_token',
+                refresh_token: refreshToken
+            })
+        });
+        if (!response.ok) {
+            throw new Error(`令牌刷新失败: ${response.status}`);
+        }
+        const tokenData: any = await response.json();
+        if (typeof tokenData.access_token !== 'string') {
+            throw new Error('刷新后未收到有效的access_token');
+        }
+        const newTokenData: TokenData = {
+            accessToken: tokenData.access_token,
+            refreshToken: tokenData.refresh_token,
+            expiresAt: Date.now() + (tokenData.expires_in * 1000)
+        };
+        await redis.set('inoreader_tokens', JSON.stringify(newTokenData));
+        console.log(`[${new Date().toISOString()}] [${functionId}] 令牌刷新并保存成功`);
+        return newTokenData.accessToken;
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] [${functionId}] 令牌刷新失败: ${(error as Error).message}`);
+        throw error;
     }
-    
-    const response = await fetch('https://www.inoreader.com/oauth2/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: clientId,
-        client_secret: clientSecret,
-        grant_type: 'refresh_token',
-        refresh_token: refreshToken
-      })
-    });
-    
-    if (!response.ok) {
-      throw new Error(`令牌刷新失败: ${response.status}`);
-    }
-    
-    const tokenData: any = await response.json();
-    if (typeof tokenData.access_token !== 'string') {
-      throw new Error('刷新后未收到有效的access_token');
-    }
-    
-    const newTokenData: TokenData = {
-      accessToken: tokenData.access_token,
-      refreshToken: tokenData.refresh_token,
-      expiresAt: Date.now() + (tokenData.expires_in * 1000)
-    };
-    await redis.set('inoreader_tokens', JSON.stringify(newTokenData));
-    console.log(`[${new Date().toISOString()}] [${functionId}] 令牌刷新并保存成功`);
-    return newTokenData.accessToken;
-  } catch (error) {
-    console.error(`[${new Date().toISOString()}] [${functionId}] 令牌刷新失败: ${(error as Error).message}`);
-    throw error;
-  }
 }
+
 
 // --- syncInoreaderToNotion 函数 (这是被修改的部分) ---
 async function syncInoreaderToNotion(): Promise<SyncResult> {
@@ -95,21 +110,19 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
   console.log(`[${new Date().toISOString()}] [${syncId}] 开始同步任务`);
   
   try {
-    // 1. 获取和验证令牌
+    // 1. 获取和验证令牌 (保持不变)
     console.log(`[${new Date().toISOString()}] [${syncId}] 步骤1/3: 获取Inoreader令牌`);
     const tokenDataFromRedis: unknown = await redis.get('inoreader_tokens');
     if (!tokenDataFromRedis || typeof tokenDataFromRedis !== 'object') {
       throw new Error('未在Redis中找到令牌对象，请先授权');
     }
     let tokenData = tokenDataFromRedis as TokenData;
-    
-    // 检查并刷新令牌
     let accessToken = tokenData.accessToken;
     if (Date.now() > tokenData.expiresAt) {
       accessToken = await refreshInoreaderToken(tokenData.refreshToken);
     }
 
-    // 2. 拉取Inoreader文章
+    // 2. 拉取Inoreader文章 (保持不变)
     console.log(`[${new Date().toISOString()}] [${syncId}] 步骤2/3: 拉取Inoreader星标文章`);
     const starredItemsResponse = await fetch(
         'https://www.inoreader.com/reader/api/0/stream/contents/user/-/state/com.google/starred',
@@ -125,10 +138,7 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
 
     // 3. 同步到Notion数据库
     console.log(`[${new Date().toISOString()}] [${syncId}] 步骤3/3: 同步到Notion`);
-    const databaseId = process.env.NOTION_DATABASE_ID;
-    if (!databaseId) {
-      throw new Error('未配置Notion数据库ID');
-    }
+    const databaseId = process.env.NOTION_DATABASE_ID!;
 
     let importedCount = 0;
     let skippedCount = 0;
@@ -157,21 +167,20 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
       
       const pageTitle = item.title?.trim() || '无标题文章';
       const sourceName = item.origin?.title?.trim() || '未知来源';
-      const content = item.summary?.content || '无内容';
+      
+      // *** 关键修改：先清洗HTML，再截断 ***
+      const rawHtmlContent = item.summary?.content;
+      const cleanedContent = cleanHtmlContent(rawHtmlContent); // 调用清洗函数
+      const finalContent = cleanedContent.substring(0, 1800);  // 对清洗后的纯文本进行截断
 
       try {
-        // *** 最终修改: 完全匹配你的Notion数据库结构 ***
         const pageData: CreatePageParameters = {
           parent: { database_id: databaseId },
           properties: {
-            // 标题列 (Title Type)
             '文章名称': { title: [{ type: 'text', text: { content: pageTitle } }] },
-            // 网址列 (URL Type)
             '网址': { url: articleUrl },
-            // 作者列 (Text/Rich Text Type)
             '作者': { rich_text: [{ type: 'text', text: { content: sourceName } }] },
-            // 内容列 (Text/Rich Text Type), 截断以防超长
-            '内容': { rich_text: [{ type: 'text', text: { content: content.substring(0, 1800) } }] }
+            '内容': { rich_text: [{ type: 'text', text: { content: finalContent } }] } // 使用清洗和截断后的内容
           }
         };
 
@@ -195,6 +204,7 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
 
 // --- 请求处理 (保持不变) ---
 export async function GET(request: NextRequest): Promise<Response> {
+  // ... 此函数代码无需修改，保持原样 ...
   try {
     const result = await syncInoreaderToNotion();
     return new Response(JSON.stringify(result), {
@@ -213,6 +223,7 @@ export async function GET(request: NextRequest): Promise<Response> {
 }
 
 export async function POST(request: NextRequest): Promise<Response> {
+    // ... 此函数代码无需修改，保持原样 ...
   try {
     const result = await syncInoreaderToNotion();
     return new Response(JSON.stringify(result), {

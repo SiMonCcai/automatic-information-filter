@@ -3,20 +3,22 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-"scripts": {
-  "dev": "next dev",
-  "build": "next build",
-  "start": "next start"
-},
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
   "dependencies": {
     "@notionhq/client": "^2.2.14",
     "@upstash/redis": "^1.35.3",
+    "html-to-text": "^9.0.5",
     "next": "15.5.0",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/html-to-text": "^9.0.4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
