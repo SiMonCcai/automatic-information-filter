@@ -174,8 +174,15 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
   }
 }
 
-// --- 请求处理 (保持不变) ---
+// --- 请求处理 (添加了安全验证) ---
 export async function GET(request: NextRequest): Promise<Response> {
+    // 1. 安全验证
+    const authHeader = request.headers.get('authorization');
+    if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+        return new Response('Unauthorized', { status: 401 });
+    }
+
+    // 2. 执行核心逻辑
     try {
         const result = await syncInoreaderToNotion();
         return new Response(JSON.stringify(result), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -183,7 +190,15 @@ export async function GET(request: NextRequest): Promise<Response> {
         return new Response(JSON.stringify({ success: false, message: (error as Error).message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
 }
+
 export async function POST(request: NextRequest): Promise<Response> {
+    // 1. 安全验证
+    const authHeader = request.headers.get('authorization');
+    if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+        return new Response('Unauthorized', { status: 401 });
+    }
+    
+    // 2. 执行核心逻辑
     try {
         const result = await syncInoreaderToNotion();
         return new Response(JSON.stringify(result), { status: 200, headers: { 'Content-Type': 'application/json' } });
