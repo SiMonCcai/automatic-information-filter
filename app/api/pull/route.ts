@@ -179,7 +179,9 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
 export async function GET(request: NextRequest): Promise<Response> {
     // 1. 安全验证
     const authHeader = request.headers.get('authorization');
+    console.log('Received Authorization Header:', authHeader);
     if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+        console.log('Expected Secret:', process.env.CRON_SECRET);
         return new Response('Unauthorized', { status: 401 });
     }
 
