@@ -38,6 +38,14 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const code = url.searchParams.get('code');
     const state = url.searchParams.get('state');
+    const baseCallbackUrl = `${url.origin}/api/oauth-callback`;
+
+    // 检查 Inoreader 是否返回了错误
+    const error = url.searchParams.get('error');
+    if (error) {
+        const errorDesc = url.searchParams.get('error_description') || '未知授权错误';
+        return createHtmlResponse('授权失败', `<p class="error">Inoreader 返回错误: ${errorDesc}</p><p><a href="${baseCallbackUrl}" class="btn">重试</a></p>`, 400);
+    }
 
     if (!code) {
       const newState = generateState();
@@ -47,7 +55,10 @@ export async function GET(request: Request) {
       authUrl.searchParams.set('client_id', clientId);
       authUrl.searchParams.set('redirect_uri', redirectUri);
       authUrl.searchParams.set('response_type', 'code');
-      authUrl.searchParams.set('scope', 'read write'); // 如果未来要实现取消收藏，可以提前授权
+      
+      // *** 关键修复：将授权范围改回 'read' ***
+      authUrl.searchParams.set('scope', 'read'); 
+
       authUrl.searchParams.set('state', newState);
 
       return createHtmlResponse('Inoreader 授权', `<p>点击下方按钮授权</p><a href="${authUrl.toString()}" class="btn">前往 Inoreader 授权</a>`, 200);
@@ -71,7 +82,7 @@ export async function GET(request: Request) {
       const tokenData = await tokenResp.json();
 
       if (!tokenResp.ok) {
-        throw new Error(tokenData.error || '令牌交换失败');
+        throw new Error(tokenData.error_description || '令牌交换失败');
       }
       
       const { access_token, refresh_token, expires_in, token_type } = tokenData;
@@ -89,10 +100,9 @@ export async function GET(request: Request) {
       
       await redis.set('inoreader_tokens', JSON.stringify(tokenStoreData));
       
-      // *** 关键修改：我们不再设置 Redis key 的过期时间 ***
-      // await redis.expire('inoreader_tokens', expires_in); // <--- 已移除这一行
+      // 确保 redis.expire 不再被调用
 
-      return createHtmlResponse('授权成功！令牌已保存', `<div class="card"><pre>${JSON.stringify(tokenStoreData, null, 2)}</pre></div>`, 200);
+      return createHtmlResponse('授权成功！令牌已永久保存', `<div class="card"><pre>${JSON.stringify(tokenStoreData, null, 2)}</pre></div>`, 200);
     }
   } catch (error) {
     console.error('授权过程出错:', error);
