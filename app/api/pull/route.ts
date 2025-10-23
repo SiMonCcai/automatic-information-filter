@@ -1,5 +1,4 @@
 // /app/api/pull/route.ts
-// a small change to trigger redeployment
 
 import { Redis } from '@upstash/redis';
 import { Client } from '@notionhq/client';
@@ -7,10 +6,15 @@ import { NextRequest } from 'next/server';
 import { convert } from 'html-to-text';
 import type {
   CreatePageParameters,
-  // 我们不再需要 BlockObjectRequest 或 RichTextItemRequest，因为类型可以被推断出来
 } from '@notionhq/client/build/src/api-endpoints';
 
-// --- 类型定义 (保持不变) ---
+// =======================================================
+//   *** 在这里修改每次导入的文章数量 ***
+const MAX_ARTICLES_PER_RUN = 20; // 推荐设置为 20-30
+// =======================================================
+
+
+// --- 类型定义 (添加了 continuation) ---
 interface TokenData {
   accessToken: string;
   refreshToken:string;
@@ -26,6 +30,7 @@ interface InoreaderItem {
 }
 interface InoreaderResponse {
   items?: InoreaderItem[];
+  continuation?: string; // Inoreader API 的“书签”
 }
 interface SyncResult {
   success: boolean;
@@ -34,7 +39,7 @@ interface SyncResult {
   skipped: number;
 }
 
-// --- 客户端初始化 (保持不变) ---
+// --- 客户端初始化 ---
 const redis = new Redis({
   url: process.env.KV_REST_API_URL!,
   token: process.env.KV_REST_API_TOKEN!,
@@ -42,12 +47,12 @@ const redis = new Redis({
 const notion = new Client({
   auth: process.env.NOTION_TOKEN,
 });
+// 定义用于存储 Inoreader 书签的 Redis 键
+const REDIS_CONTINUATION_KEY = 'inoreader_continuation_token';
 
-// --- HTML 清洗函数 (保持不变) ---
+// --- HTML 清洗函数 ---
 function cleanHtmlContent(html: string | undefined | null): string {
-  if (!html) {
-    return '';
-  }
+  if (!html) return '';
   return convert(html, {
     wordwrap: false,
     selectors: [
@@ -57,7 +62,7 @@ function cleanHtmlContent(html: string | undefined | null): string {
   }).replace(/\n\s*\n/g, '\n');
 }
 
-// --- 文本分割函数 (保持不变) ---
+// --- 文本分割函数 ---
 function splitTextForRichText(text: string, chunkSize = 1800): string[] {
     const chunks: string[] = [];
     if (!text) return chunks;
@@ -69,7 +74,7 @@ function splitTextForRichText(text: string, chunkSize = 1800): string[] {
     return chunks;
 }
 
-// --- refreshInoreaderToken 函数 (保持不变) ---
+// --- 刷新 Inoreader 令牌函数 ---
 async function refreshInoreaderToken(refreshToken: string): Promise<string> {
     try {
         const clientId = process.env.INOREADER_CLIENT_ID;
@@ -96,24 +101,51 @@ async function refreshInoreaderToken(refreshToken: string): Promise<string> {
     }
 }
 
-// --- syncInoreaderToNotion 函数 (最终正确版本) ---
+// --- 核心同步函数 (已集成“书签”机制) ---
 async function syncInoreaderToNotion(): Promise<SyncResult> {
   const syncId = `sync_${Date.now().toString().slice(-6)}`;
+  console.log(`[${syncId}] 开始同步任务`);
   
   try {
+    // 1. 获取并刷新令牌
     const tokenDataFromRedis: unknown = await redis.get('inoreader_tokens');
     if (!tokenDataFromRedis || typeof tokenDataFromRedis !== 'object') throw new Error('未在Redis中找到令牌对象，请先授权');
     let tokenData = tokenDataFromRedis as TokenData;
     let accessToken = tokenData.accessToken;
     if (Date.now() > tokenData.expiresAt) {
+      console.log(`[${syncId}] 令牌已过期，正在刷新...`);
       accessToken = await refreshInoreaderToken(tokenData.refreshToken);
     }
-    const starredItemsResponse = await fetch('https://www.inoreader.com/reader/api/0/stream/contents/user/-/state/com.google/starred', { headers: { 'Authorization': `Bearer ${accessToken}` } });
-    if (!starredItemsResponse.ok) throw new Error(`拉取文章失败: ${starredItemsResponse.status}`);
-    const starredData: InoreaderResponse = await starredItemsResponse.json();
-    const items = Array.isArray(starredData.items) ? starredData.items : [];
-    const itemsToImport = items.slice(0, 10);
 
+    // 2. 使用“书签”拉取 Inoreader 文章
+    const continuationToken = await redis.get<string>(REDIS_CONTINUATION_KEY);
+    
+    // 构件 API URL，n 参数控制数量，c 参数是书签
+    let apiUrl = `https://www.inoreader.com/reader/api/0/stream/contents/user/-/state/com.google/starred?n=${MAX_ARTICLES_PER_RUN}`;
+    if (continuationToken) {
+        apiUrl += `&c=${continuationToken}`;
+        console.log(`[${syncId}] 使用书签继续拉取...`);
+    } else {
+        console.log(`[${syncId}] 从头开始拉取`);
+    }
+
+    const starredItemsResponse = await fetch(apiUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
+    if (!starredItemsResponse.ok) throw new Error(`拉取文章失败: ${starredItemsResponse.status}`);
+    
+    const starredData: InoreaderResponse = await starredItemsResponse.json();
+    const itemsToImport = Array.isArray(starredData.items) ? starredData.items : [];
+    console.log(`[${syncId}] 本次拉取到 ${itemsToImport.length} 篇文章进行处理`);
+
+    // 3. 保存新的“书签”
+    if (starredData.continuation) {
+        await redis.set(REDIS_CONTINUATION_KEY, starredData.continuation);
+        console.log(`[${syncId}] 已保存新的书签供下次使用`);
+    } else {
+        await redis.del(REDIS_CONTINUATION_KEY);
+        console.log(`[${syncId}] 已到达列表末尾，下次将从头开始`);
+    }
+
+    // 4. 同步到 Notion
     const databaseId = process.env.NOTION_DATABASE_ID!;
     let importedCount = 0;
     let skippedCount = 0;
@@ -121,9 +153,11 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
     for (const item of itemsToImport) {
       const articleUrl = (item.canonical?.[0]?.href) || (item.alternate?.[0]?.href);
       if (!articleUrl) {
-        skippedCount++;
+        skippedCount++; // 理论上不会发生，作为保护
         continue;
       }
+      
+      // 注意：我们依然保留了重复检查，这是一个双重保险，非常稳固
       try {
         const existingPages = await notion.databases.query({ database_id: databaseId, filter: { property: '网址', url: { equals: articleUrl } } });
         if (existingPages.results.length > 0) {
@@ -131,6 +165,7 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
           continue;
         }
       } catch (queryError) {
+        console.error(`[${syncId}] 检查文章存在性失败 for "${item.title}": ${(queryError as Error).message}`);
         skippedCount++;
         continue; 
       }
@@ -141,7 +176,6 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
       const fullContent = cleanHtmlContent(item.summary?.content);
       const contentChunks = splitTextForRichText(fullContent);
 
-      // 关键修复：移除显式的类型声明，让 TypeScript 自动推断
       const contentForNotionProperty = contentChunks.map(chunk => ({
         type: 'text' as const,
         text: { content: chunk }
@@ -160,32 +194,30 @@ async function syncInoreaderToNotion(): Promise<SyncResult> {
         };
 
         await notion.pages.create(pageData);
-        console.log(`成功导入: ${pageTitle.substring(0, 30)}...`);
+        console.log(`[${syncId}] 成功导入: ${pageTitle.substring(0, 30)}...`);
         importedCount++;
       } catch (createError) {
-        console.error(`创建页面失败 for "${pageTitle}": ${(createError as Error).message}`);
+        console.error(`[${syncId}] 创建页面失败 for "${pageTitle}": ${(createError as Error).message}`);
         skippedCount++;
       }
     }
     
     return { success: true, message: `同步完成, 成功导入${importedCount}篇, 跳过${skippedCount}篇`, imported: importedCount, skipped: skippedCount };
   } catch (error) {
-    console.error(`同步任务失败: ${(error as Error).message}`);
+    console.error(`[${syncId}] 同步任务失败: ${(error as Error).message}`);
     throw error;
   }
 }
 
-// --- 请求处理 (添加了安全验证) ---
+// --- 请求处理 (保持了安全验证和调试日志) ---
 export async function GET(request: NextRequest): Promise<Response> {
-    // 1. 安全验证
     const authHeader = request.headers.get('authorization');
-    console.log('Received Authorization Header:', authHeader);
+    console.log('Received Authorization Header:', authHeader ? authHeader.substring(0, 15) + '...' : 'null'); // 只打印部分密钥，保护安全
     if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-        console.log('Expected Secret:', process.env.CRON_SECRET);
+        console.log('Authorization failed. Expected Secret starting with:', process.env.CRON_SECRET ? process.env.CRON_SECRET.substring(0, 5) + '...' : 'null');
         return new Response('Unauthorized', { status: 401 });
     }
 
-    // 2. 执行核心逻辑
     try {
         const result = await syncInoreaderToNotion();
         return new Response(JSON.stringify(result), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -195,13 +227,11 @@ export async function GET(request: NextRequest): Promise<Response> {
 }
 
 export async function POST(request: NextRequest): Promise<Response> {
-    // 1. 安全验证
     const authHeader = request.headers.get('authorization');
     if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
         return new Response('Unauthorized', { status: 401 });
     }
     
-    // 2. 执行核心逻辑
     try {
         const result = await syncInoreaderToNotion();
         return new Response(JSON.stringify(result), { status: 200, headers: { 'Content-Type': 'application/json' } });
