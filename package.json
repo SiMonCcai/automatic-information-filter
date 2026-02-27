@@ -12,7 +12,7 @@
     "@notionhq/client": "^2.2.14",
     "@upstash/redis": "^1.35.3",
     "html-to-text": "^9.0.5",
-    "next": "15.5.0",
+    "next": "15.5.7",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },
