@@ -1,0 +1,125 @@
+# RSS Pipeline
+
+A modular RSS feed fetching, cleaning, and Notion synchronization pipeline.
+
+## Features
+
+- **RSS Feed Fetching**: Parse RSS/Atom feeds with error handling
+- **Deduplication**: URL-based deduplication with content fingerprint fallback
+- **HTML Cleaning**: Convert HTML content to plain text
+- **Notion Sync**: Push articles to Notion database
+- **SQLite Storage**: Persistent storage for feeds, articles, and sync jobs
+
+## Installation
+
+```bash
+# Install dependencies
+pip install feedparser beautifulsoup4 notion-client
+
+# Or with requirements
+pip install -r requirements.txt
+```
+
+## Configuration
+
+Copy `.env.example` to `.env` and configure:
+
+```bash
+cp .env.example .env
+```
+
+Required for Notion sync:
+- `NOTION_API_KEY`: Your Notion integration token
+- `NOTION_DATABASE_ID`: Target database ID
+
+## Database Schema
+
+### Tables
+
+- **feeds**: RSS feed configurations
+  - id, name, url, enabled, created_at, last_fetched_at, fetch_error
+
+- **articles_raw**: Fetched articles
+  - id, feed_id, title, url, author, content_raw, content_text, published_at,
+    fetched_at, fingerprint, synced_at, notion_page_id
+
+- **sync_jobs**: Sync job tracking
+  - id, started_at, finished_at, status, articles_synced, error_message
+
+## Usage
+
+### CLI
+
+```bash
+# List feeds
+python3 -m pipeline.cli feed list
+
+# Add a feed
+python3 -m pipeline.cli feed add --name "Example Feed" --url "https://example.com/rss"
+
+# Disable a feed
+python3 -m pipeline.cli feed disable --id 1
+
+# Run single sync
+python3 -m pipeline.cli sync once
+
+# Dry run (no Notion sync)
+python3 -m pipeline.cli sync once --dry-run
+```
+
+### Runner
+
+```bash
+# Run once
+python3 -m pipeline.runner --once
+
+# Continuous mode (default 60 minute interval)
+python3 -m pipeline.runner
+
+# Custom interval
+python3 -m pipeline.runner --interval 30
+```
+
+## Cron Setup
+
+Run hourly via cron:
+
+```cron
+# Run RSS pipeline every hour
+0 * * * * cd /path/to/workspace && . .env && python3 -m pipeline.runner --once >> pipeline.log 2>&1
+```
+
+Or with the CLI:
+
+```cron
+0 * * * * cd /path/to/workspace && . .env && python3 -m pipeline.cli sync once >> pipeline.log 2>&1
+```
+
+## Notion Database Setup
+
+Your Notion database must have the following properties:
+
+| Property Name | Type       | Required |
+|--------------|------------|----------|
+| 文章名称       | Title      | Yes      |
+| 网址          | URL        | Yes      |
+| 作者          | Text       | Yes      |
+| 内容          | Text       | Yes      |
+| 发布时间       | Date       | No       |
+
+## Data Flow
+
+1. **Fetch**: Parse RSS feeds and extract articles
+2. **Deduplicate**: Skip articles by URL (same feed) or content fingerprint
+3. **Clean**: Convert HTML content to plain text
+4. **Sync**: Push unsynced articles to Notion
+
+## Deduplication Strategy
+
+1. **Primary**: URL uniqueness per feed
+2. **Fallback**: SHA-256 fingerprint of `title + published_at + author`
+
+This handles:
+- Duplicate URLs in the same feed
+- Same content across different feeds
+- Articles with changed URLs but same content
