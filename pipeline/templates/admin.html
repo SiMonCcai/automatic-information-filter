@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RSS Pipeline Admin</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+            line-height: 1.5;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        h2 {
+            color: #555;
+            margin: 25px 0 15px;
+            font-size: 18px;
+        }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: opacity 0.2s;
+        }
+        .btn:hover {
+            opacity: 0.85;
+        }
+        .btn-primary {
+            background: #007bff;
+            color: white;
+        }
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+        .btn-sm {
+            padding: 4px 10px;
+            font-size: 12px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            text-align: left;
+            padding: 12px 8px;
+            border-bottom: 1px solid #eee;
+            font-size: 14px;
+        }
+        th {
+            color: #666;
+            font-weight: 500;
+        }
+        tr:hover {
+            background: #f8f9fa;
+        }
+        input[type="text"], input[type="url"] {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .form-inline {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .form-inline input {
+            flex: 1;
+            min-width: 150px;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        .status-running {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .status-completed {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status-failed {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .enabled-yes {
+            color: #28a745;
+            font-weight: 500;
+        }
+        .enabled-no {
+            color: #6c757d;
+        }
+        .sync-info {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .sync-info > div {
+            display: flex;
+            gap: 5px;
+            align-items: center;
+        }
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #007bff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .error-msg {
+            color: #dc3545;
+            font-size: 12px;
+        }
+        .empty-state {
+            color: #999;
+            text-align: center;
+            padding: 20px;
+        }
+        .url-cell {
+            max-width: 250px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .author-input {
+            width: 100px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>RSS Pipeline Admin</h1>
+
+        <!-- Sync Status Card -->
+        <div class="card">
+            <h2>Sync Status</h2>
+            <div class="sync-info">
+                <div>
+                    <span>Unsynced: <strong id="unsynced-count">-</strong></span>
+                </div>
+                <div>
+                    <span id="sync-status-indicator"></span>
+                </div>
+                <div>
+                    <button class="btn btn-primary" onclick="triggerSync()" id="sync-btn">Run Sync Now</button>
+                </div>
+            </div>
+            <div id="sync-message" style="margin-top: 10px; font-size: 13px;"></div>
+        </div>
+
+        <!-- Sync Jobs -->
+        <div class="card">
+            <h2>Recent Sync Jobs</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Started</th>
+                        <th>Status</th>
+                        <th>Synced</th>
+                        <th>Error</th>
+                    </tr>
+                </thead>
+                <tbody id="jobs-table">
+                    <tr><td colspan="5" class="empty-state">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Feeds Management -->
+        <div class="card">
+            <h2>Feeds</h2>
+            <div class="form-inline" style="margin-bottom: 15px;">
+                <input type="text" id="new-feed-name" placeholder="Feed name">
+                <input type="url" id="new-feed-url" placeholder="Feed URL">
+                <input type="text" id="new-feed-author" placeholder="Default author (optional)">
+                <button class="btn btn-success" onclick="addFeed()">Add Feed</button>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Name</th>
+                        <th>URL</th>
+                        <th>Default Author</th>
+                        <th>Enabled</th>
+                        <th>Last Fetched</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="feeds-table">
+                    <tr><td colspan="7" class="empty-state">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // API helpers
+        async function apiCall(url, options = {}) {
+            const response = await fetch(url, options);
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'Request failed');
+            }
+            return response.json();
+        }
+
+        // Load feeds
+        async function loadFeeds() {
+            try {
+                const feeds = await apiCall('/api/feeds');
+                const tbody = document.getElementById('feeds-table');
+                if (feeds.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No feeds yet. Add one above!</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = feeds.map(f => `
+                    <tr>
+                        <td>${f.id}</td>
+                        <td>${escapeHtml(f.name)}</td>
+                        <td class="url-cell" title="${escapeHtml(f.url)}">${escapeHtml(f.url)}</td>
+                        <td>
+                            <input type="text" class="author-input" value="${escapeHtml(f.default_author || '')}"
+                                   onchange="updateAuthor(${f.id}, this.value)" placeholder="None">
+                        </td>
+                        <td class="${f.enabled ? 'enabled-yes' : 'enabled-no'}">
+                            ${f.enabled ? 'Yes' : 'No'}
+                        </td>
+                        <td>${f.last_fetched_at ? new Date(f.last_fetched_at).toLocaleString() : '-'}</td>
+                        <td>
+                            <button class="btn btn-sm btn-primary" onclick="toggleFeed(${f.id})">
+                                ${f.enabled ? 'Disable' : 'Enable'}
+                            </button>
+                            <button class="btn btn-sm btn-danger" onclick="deleteFeed(${f.id})">Delete</button>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                document.getElementById('feeds-table').innerHTML = `<tr><td colspan="7" class="error-msg">Error: ${e.message}</td></tr>`;
+            }
+        }
+
+        // Load sync status
+        async function loadSyncStatus() {
+            try {
+                const data = await apiCall('/api/sync/status');
+
+                // Update unsynced count
+                document.getElementById('unsynced-count').textContent = data.unsynced_count;
+
+                // Update status indicator
+                const indicator = document.getElementById('sync-status-indicator');
+                const btn = document.getElementById('sync-btn');
+                if (data.sync_running) {
+                    indicator.innerHTML = '<span class="loading"></span> Running...';
+                    btn.disabled = true;
+                } else {
+                    indicator.innerHTML = '<span class="status-badge status-completed">Idle</span>';
+                    btn.disabled = false;
+                }
+
+                // Update jobs table
+                const jobsTbody = document.getElementById('jobs-table');
+                if (data.jobs.length === 0) {
+                    jobsTbody.innerHTML = '<tr><td colspan="5" class="empty-state">No sync jobs yet.</td></tr>';
+                } else {
+                    jobsTbody.innerHTML = data.jobs.map(j => {
+                        const statusClass = j.status === 'running' ? 'status-running' :
+                                          j.status === 'completed' ? 'status-completed' : 'status-failed';
+                        const started = new Date(j.started_at).toLocaleString();
+                        return `
+                            <tr>
+                                <td>${j.id}</td>
+                                <td>${started}</td>
+                                <td><span class="status-badge ${statusClass}">${j.status}</span></td>
+                                <td>${j.articles_synced}</td>
+                                <td class="error-msg">${j.error || '-'}</td>
+                            </tr>
+                        `;
+                    }).join('');
+                }
+
+                // Show last result message if any
+                if (data.last_result) {
+                    const r = data.last_result;
+                    const msg = `Last: ${r.fetch?.articles_added || 0} added, ${r.sync?.synced || 0} synced`;
+                    document.getElementById('sync-message').textContent = msg;
+                }
+            } catch (e) {
+                console.error('Error loading sync status:', e);
+            }
+        }
+
+        // Add feed
+        async function addFeed() {
+            const name = document.getElementById('new-feed-name').value.trim();
+            const url = document.getElementById('new-feed-url').value.trim();
+            const defaultAuthor = document.getElementById('new-feed-author').value.trim() || null;
+
+            if (!name || !url) {
+                alert('Please enter name and URL');
+                return;
+            }
+
+            try {
+                await apiCall('/api/feeds', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ name, url, default_author: defaultAuthor })
+                });
+                document.getElementById('new-feed-name').value = '';
+                document.getElementById('new-feed-url').value = '';
+                document.getElementById('new-feed-author').value = '';
+                loadFeeds();
+            } catch (e) {
+                alert('Error adding feed: ' + e.message);
+            }
+        }
+
+        // Delete feed
+        async function deleteFeed(id) {
+            if (!confirm('Delete this feed? Articles will also be deleted.')) return;
+            try {
+                await apiCall(`/api/feeds/${id}`, { method: 'DELETE' });
+                loadFeeds();
+            } catch (e) {
+                alert('Error deleting feed: ' + e.message);
+            }
+        }
+
+        // Toggle feed
+        async function toggleFeed(id) {
+            try {
+                await apiCall(`/api/feeds/${id}/toggle`, { method: 'POST' });
+                loadFeeds();
+            } catch (e) {
+                alert('Error toggling feed: ' + e.message);
+            }
+        }
+
+        // Update author
+        async function updateAuthor(id, author) {
+            try {
+                await apiCall(`/api/feeds/${id}/author`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ default_author: author || null })
+                });
+            } catch (e) {
+                alert('Error updating author: ' + e.message);
+                loadFeeds();
+            }
+        }
+
+        // Trigger sync
+        async function triggerSync() {
+            try {
+                await apiCall('/api/sync/trigger', { method: 'POST' });
+                loadSyncStatus();
+            } catch (e) {
+                alert('Error triggering sync: ' + e.message);
+            }
+        }
+
+        // Utility: escape HTML
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Initial load and auto-refresh
+        loadFeeds();
+        loadSyncStatus();
+        setInterval(() => {
+            loadFeeds();
+            loadSyncStatus();
+        }, 5000);
+    </script>
+</body>
+</html>

@@ -9,12 +9,13 @@ A modular RSS feed fetching, cleaning, and Notion synchronization pipeline.
 - **HTML Cleaning**: Convert HTML content to plain text
 - **Notion Sync**: Push articles to Notion database
 - **SQLite Storage**: Persistent storage for feeds, articles, and sync jobs
+- **Web Admin Panel**: Simple web interface for feed and sync management
 
 ## Installation
 
 ```bash
 # Install dependencies
-pip install feedparser beautifulsoup4 notion-client
+pip install feedparser beautifulsoup4 notion-client flask
 
 # Or with requirements
 pip install -r requirements.txt
@@ -32,12 +33,19 @@ Required for Notion sync:
 - `NOTION_API_KEY`: Your Notion integration token
 - `NOTION_DATABASE_ID`: Target database ID
 
+Required for admin panel:
+- `ADMIN_USERNAME`: Admin username (HTTP Basic Auth)
+- `ADMIN_PASSWORD`: Admin password
+
+Optional:
+- `PIPELINE_DB_PATH`: Database path (default: pipeline.db)
+
 ## Database Schema
 
 ### Tables
 
 - **feeds**: RSS feed configurations
-  - id, name, url, enabled, created_at, last_fetched_at, fetch_error
+  - id, name, url, enabled, created_at, last_fetched_at, fetch_error, default_author
 
 - **articles_raw**: Fetched articles
   - id, feed_id, title, url, author, content_raw, content_text, published_at,
@@ -45,6 +53,27 @@ Required for Notion sync:
 
 - **sync_jobs**: Sync job tracking
   - id, started_at, finished_at, status, articles_synced, error_message
+
+## Admin Panel
+
+Start the web admin panel:
+
+```bash
+python3 -m pipeline.admin
+```
+
+Or with custom host/port:
+
+```bash
+python3 -m pipeline.admin --host 0.0.0.0 --port 8080
+```
+
+The admin panel provides:
+- **Feed Management**: Add, delete, enable/disable feeds
+- **Author Mapping**: Set default author per feed (used when article author is empty)
+- **Sync Control**: Trigger manual sync, view sync status and history
+
+Default access at http://127.0.0.1:5000 (requires HTTP Basic Auth).
 
 ## Usage
 

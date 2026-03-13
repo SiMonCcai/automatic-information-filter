@@ -73,13 +73,20 @@ class Fetcher:
             logger.debug(f"Article already exists: {parsed.url}")
             return None
 
+        # Get feed for default_author
+        feed = self.storage.get_feed(feed_id)
+        default_author = feed.default_author if feed else None
+
+        # Use default_author if parsed author is empty
+        author = parsed.author or default_author
+
         # Create fingerprint for content deduplication
         fingerprint = None
         if self.config.enable_content_fingerprint:
             fingerprint = make_fingerprint(
                 parsed.title,
                 parsed.published_at,
-                parsed.author or "unknown"
+                author or "unknown"
             )
 
             # Check for fingerprint duplicate across feeds
@@ -92,7 +99,7 @@ class Fetcher:
             feed_id=feed_id,
             title=parsed.title,
             url=parsed.url,
-            author=parsed.author,
+            author=author,
             content_raw=parsed.content_raw,
             content_text=None,  # Will be cleaned later
             published_at=parsed.published_at,
