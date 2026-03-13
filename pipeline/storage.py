@@ -22,6 +22,7 @@ class Feed:
     created_at: str
     last_fetched_at: Optional[str] = None
     fetch_error: Optional[str] = None
+    default_author: Optional[str] = None
 
 
 @dataclass
@@ -89,9 +90,16 @@ class Storage:
                     enabled BOOLEAN NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     last_fetched_at TEXT,
-                    fetch_error TEXT
+                    fetch_error TEXT,
+                    default_author TEXT
                 )
             """)
+
+            # Migration: add default_author column if not exists
+            cursor = conn.execute("PRAGMA table_info(feeds)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if "default_author" not in columns:
+                conn.execute("ALTER TABLE feeds ADD COLUMN default_author TEXT")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS articles_raw (
@@ -191,6 +199,36 @@ class Storage:
                 "UPDATE feeds SET enabled = ? WHERE id = ?",
                 (1 if enabled else 0, feed_id)
             )
+
+    def update_feed_default_author(self, feed_id: int, default_author: Optional[str]) -> None:
+        """Update default author for a feed."""
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE feeds SET default_author = ? WHERE id = ?",
+                (default_author, feed_id)
+            )
+
+    def delete_feed(self, feed_id: int) -> None:
+        """Delete a feed (cascades to articles)."""
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM feeds WHERE id = ?", (feed_id,))
+
+    def get_unsynced_count(self) -> int:
+        """Get count of unsynced articles."""
+        conn = self._get_conn()
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM articles_raw WHERE synced_at IS NULL"
+        )
+        return cursor.fetchone()[0]
+
+    def list_sync_jobs(self, limit: int = 20) -> List[SyncJob]:
+        """List recent sync jobs."""
+        conn = self._get_conn()
+        cursor = conn.execute(
+            "SELECT * FROM sync_jobs ORDER BY id DESC LIMIT ?",
+            (limit,)
+        )
+        return [SyncJob(**dict(row)) for row in cursor.fetchall()]
 
     # Article operations
 
