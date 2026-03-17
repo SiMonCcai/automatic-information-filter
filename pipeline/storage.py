@@ -311,6 +311,20 @@ class Storage:
                 WHERE id = ?
             """, (notion_page_id, article_id))
 
+    def cleanup_synced_articles(self, keep_days: int = 7) -> int:
+        """Delete synced articles older than keep_days days.
+
+        Keeps unsynced rows intact to avoid data loss before Notion sync.
+        Returns number of deleted rows.
+        """
+        with self.transaction() as conn:
+            cursor = conn.execute("""
+                DELETE FROM articles_raw
+                WHERE synced_at IS NOT NULL
+                  AND fetched_at < datetime('now', ?)
+            """, (f'-{keep_days} days',))
+            return cursor.rowcount
+
     # Sync job operations
 
     def create_sync_job(self) -> SyncJob:

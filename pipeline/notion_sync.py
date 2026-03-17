@@ -7,7 +7,7 @@ Matches legacy behavior from tmp_aif/app/api/pull/route.ts:
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
 try:
@@ -20,6 +20,25 @@ from .storage import Article, Storage
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_after_threshold(published_at: str | None, threshold_date: str | None) -> bool:
+    """Return True when published_at >= threshold_date (YYYY-MM-DD)."""
+    if not threshold_date:
+        return True
+    if not published_at:
+        return False
+    try:
+        th = datetime.fromisoformat(threshold_date).replace(tzinfo=timezone.utc)
+    except Exception:
+        return True
+    try:
+        dt = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return False
+    return dt >= th
 
 # Content chunk size matching legacy: 1800 chars per chunk
 CONTENT_CHUNK_SIZE = 1800
@@ -172,6 +191,8 @@ def sync_articles_to_notion(
     database_id: str,
     batch_size: int = 100,
     dry_run: bool = False,
+    sync_published_after: str | None = None,
+    sync_scan_limit: int = 100,
 ) -> dict[str, any]:
     """
     Main sync function - fetches unsynced articles and pushes to Notion.
@@ -194,7 +215,23 @@ def sync_articles_to_notion(
         }
 
     # Get unsynced articles
-    articles = storage.get_unsynced_articles(limit=batch_size)
+    scan_limit = max(batch_size, sync_scan_limit)
+    articles = storage.get_unsynced_articles(limit=scan_limit)
+
+    # Optional published_at threshold filter (e.g. 2026-03-01)
+    eligible_articles = [a for a in articles if _is_after_threshold(a.published_at, sync_published_after)]
+
+    eligible_articles = eligible_articles[:batch_size]
+
+    if not eligible_articles:
+        logger.info("No eligible unsynced articles found for current threshold")
+        return {
+            "success": True,
+            "synced": 0,
+            "pending": len(articles),
+            "skipped_by_date": len(articles),
+            "threshold": sync_published_after,
+        }
 
     if not articles:
         logger.info("No unsynced articles found")
@@ -204,20 +241,20 @@ def sync_articles_to_notion(
             "pending": 0,
         }
 
-    logger.info(f"Syncing {len(articles)} articles to Notion...")
+    logger.info(f"Syncing {len(eligible_articles)} articles to Notion...")
 
     if dry_run:
         return {
             "success": True,
             "synced": 0,
-            "pending": len(articles),
+            "pending": len(eligible_articles),
             "dry_run": True,
         }
 
-    synced, errors, page_map = syncer.sync_articles(articles)
+    synced, errors, page_map = syncer.sync_articles(eligible_articles)
 
     # Mark synced articles with real Notion page IDs
-    for article in articles:
+    for article in eligible_articles:
         page_id = page_map.get(article.id)
         if page_id:
             storage.mark_article_synced(article.id, page_id)

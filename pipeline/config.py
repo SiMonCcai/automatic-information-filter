@@ -31,6 +31,10 @@ class Config:
     # Logging
     log_level: str = "INFO"
 
+    # Sync filter
+    sync_published_after: Optional[str] = None  # ISO date, e.g. 2026-03-01
+    sync_scan_limit: int = 100  # how many unsynced rows to scan before filtering
+
     @classmethod
     def from_env(cls) -> "Config":
         """Create configuration from environment variables."""
@@ -44,6 +48,8 @@ class Config:
             request_delay=float(os.getenv("REQUEST_DELAY", "1.0")),
             enable_content_fingerprint=os.getenv("ENABLE_CONTENT_FINGERPRINT", "true").lower() == "true",
             log_level=os.getenv("LOG_LEVEL", "INFO"),
+            sync_published_after=os.getenv("SYNC_PUBLISHED_AFTER"),
+            sync_scan_limit=int(os.getenv("SYNC_SCAN_LIMIT", "100")),
         )
 
     def validate_for_sync(self) -> None:
