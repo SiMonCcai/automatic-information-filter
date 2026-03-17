@@ -106,6 +106,8 @@ def run_once(config: Config, storage: Storage, dry_run: bool = False) -> dict[st
                 config.notion_database_id,
                 batch_size=100,
                 dry_run=dry_run,
+                sync_published_after=config.sync_published_after,
+                sync_scan_limit=config.sync_scan_limit,
             )
             results["sync"] = sync_result
 
@@ -117,6 +119,15 @@ def run_once(config: Config, storage: Storage, dry_run: bool = False) -> dict[st
         else:
             logger.info("Notion not configured, skipping sync")
             results["sync"] = {"skipped": True, "reason": "Not not configured"}
+
+        # Step 4: Cleanup old synced articles
+        logger.info("=" * 50)
+        logger.info("STEP 4: Cleanup old synced articles...")
+        logger.info("=" * 50)
+
+        deleted_count = storage.cleanup_synced_articles(keep_days=7)
+        results["cleanup"] = {"deleted": deleted_count, "keep_days": 7}
+        logger.info(f"Cleanup complete: deleted {deleted_count} synced articles older than 7 days")
 
         # Finish job
         elapsed = (datetime.now() - start_time).total_seconds()
