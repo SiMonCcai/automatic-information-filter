@@ -39,8 +39,6 @@ Required for admin panel:
 
 Optional:
 - `PIPELINE_DB_PATH`: Database path (default: pipeline.db)
-- `SYNC_PUBLISHED_AFTER`: only sync articles with `published_at >= YYYY-MM-DD` (e.g. `2026-03-01`)
-- `SYNC_SCAN_LIMIT`: number of unsynced rows to scan before date filtering (default: `100`)
 
 ## Database Schema
 
@@ -143,14 +141,7 @@ Your Notion database must have the following properties:
 1. **Fetch**: Parse RSS feeds and extract articles
 2. **Deduplicate**: Skip articles by URL (same feed) or content fingerprint
 3. **Clean**: Convert HTML content to plain text
-4. **Sync**: Push eligible unsynced articles to Notion
-5. **Cleanup**: Delete synced rows older than 7 days (`synced_at IS NOT NULL`)
-
-## Unsynced Count Semantics
-
-- `unsynced_count` in admin means `synced_at IS NULL` raw count.
-- When `SYNC_PUBLISHED_AFTER` is set, some unsynced rows may be intentionally skipped by date filter and remain unsynced.
-- If you want the dashboard number to represent only immediately syncable items, add a separate `eligible_count` metric (not enabled by default).
+4. **Sync**: Push unsynced articles to Notion
 
 ## Deduplication Strategy
 
