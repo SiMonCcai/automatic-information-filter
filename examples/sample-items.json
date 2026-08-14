@@ -1,0 +1,20 @@
+[
+  {
+    "id": "demo-1",
+    "title": "A practical automation workflow",
+    "content": "This walkthrough shows how to remove repetitive steps from a daily research workflow.",
+    "url": "https://example.com/articles/automation-workflow"
+  },
+  {
+    "id": "demo-2",
+    "title": "Sponsored product announcement",
+    "content": "This advertisement was included to demonstrate an exclusion rule.",
+    "url": "https://example.com/articles/sponsored"
+  },
+  {
+    "id": "demo-3",
+    "title": "Short note",
+    "content": "Too short",
+    "url": "https://example.com/articles/short"
+  }
+]
