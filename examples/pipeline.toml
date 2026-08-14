@@ -1,0 +1,26 @@
+# A complete local example. Paths are relative to this file.
+
+[[sources]]
+type = "json_file"
+path = "sample-items.json"
+source = "demo"
+
+[[processors]]
+type = "minimum_length"
+field = "content"
+minimum = 20
+
+[[processors]]
+type = "keyword"
+include_any = ["AI", "automation", "workflow"]
+exclude_any = ["sponsored", "advertisement"]
+fields = ["title", "content"]
+
+[[sinks]]
+type = "jsonl"
+path = "output/accepted.jsonl"
+append = false
+
+[state]
+type = "sqlite"
+path = "output/state.db"
