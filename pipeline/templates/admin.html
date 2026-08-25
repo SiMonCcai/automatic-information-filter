@@ -59,6 +59,10 @@
             background: #28a745;
             color: white;
         }
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
         .btn-sm {
             padding: 4px 10px;
             font-size: 12px;
@@ -164,6 +168,85 @@
         .author-input {
             width: 100px;
         }
+        textarea {
+            width: 100%;
+            min-height: 120px;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            font-family: inherit;
+            resize: vertical;
+        }
+        .prompt-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+        .prompt-item label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #444;
+        }
+        .helper-text {
+            color: #666;
+            font-size: 13px;
+            margin-bottom: 12px;
+        }
+        .save-status {
+            font-size: 13px;
+            margin-left: 10px;
+        }
+        .muted-status {
+            color: #666;
+            font-size: 12px;
+            margin-left: 10px;
+        }
+        .rule-count {
+            display: inline-block;
+            margin-left: 6px;
+            color: #666;
+            font-size: 12px;
+        }
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.45);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            z-index: 1000;
+        }
+        .modal-backdrop.open {
+            display: flex;
+        }
+        .modal-card {
+            background: white;
+            border-radius: 10px;
+            width: min(860px, 100%);
+            max-height: 90vh;
+            overflow: auto;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            padding: 20px;
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .modal-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+        .log-table td, .log-table th {
+            font-size: 13px;
+            vertical-align: top;
+        }
     </style>
 </head>
 <body>
@@ -206,9 +289,29 @@
             </table>
         </div>
 
+        <!-- Scoring Prompt Config -->
+        <div class="card">
+            <h2>DeepSeek Prompt Config</h2>
+            <div class="helper-text">6 个评分字段会分开调用 DeepSeek；分类 / 摘要 / 金句 会合并成 1 次调用。这里填写原始提示词，后端会自动补上只传标题+正文与 JSON 返回约束。</div>
+            <div id="prompt-grid" class="prompt-grid">
+                <div class="empty-state" style="grid-column: 1 / -1;">Loading...</div>
+            </div>
+            <div class="prompt-item" style="margin-top: 16px;">
+                <label for="combined-prompt">分类 / 摘要 / 金句 合并提示词</label>
+                <textarea id="combined-prompt" placeholder="填写分类、摘要、金句共用的提示词"></textarea>
+            </div>
+            <div style="margin-top: 16px; display: flex; align-items: center;">
+                <button class="btn btn-primary" onclick="saveScoringPrompts()">Save Prompts</button>
+                <span id="prompt-save-status" class="save-status"></span>
+            </div>
+        </div>
+
         <!-- Feeds Management -->
         <div class="card">
-            <h2>Feeds</h2>
+            <h2>
+                Feeds
+                <span id="feeds-refresh-status" class="muted-status"></span>
+            </h2>
             <div class="form-inline" style="margin-bottom: 15px;">
                 <input type="text" id="new-feed-name" placeholder="Feed name">
                 <input type="url" id="new-feed-url" placeholder="Feed URL">
@@ -234,15 +337,140 @@
         </div>
     </div>
 
+    <div id="filter-modal" class="modal-backdrop" onclick="maybeCloseFilterModal(event)">
+        <div class="modal-card" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <div>
+                    <h2 id="filter-modal-title" style="margin: 0;">过滤规则</h2>
+                    <div class="helper-text" style="margin: 6px 0 0;">
+                        命中任一关键词就直接丢弃：不调 AI，也不推送到 Notion。
+                    </div>
+                </div>
+                <button class="btn btn-secondary btn-sm" onclick="closeFilterModal()">关闭</button>
+            </div>
+            <div class="modal-grid">
+                <div>
+                    <label for="filter-title-keywords" style="display:block;font-weight:600;margin-bottom:8px;">标题关键词</label>
+                    <textarea id="filter-title-keywords" placeholder="一行一个关键词，命中任一条即丢弃"></textarea>
+                </div>
+                <div>
+                    <label for="filter-content-keywords" style="display:block;font-weight:600;margin-bottom:8px;">正文关键词</label>
+                    <textarea id="filter-content-keywords" placeholder="一行一个关键词，基于正文纯文本匹配"></textarea>
+                </div>
+            </div>
+            <div style="margin-top: 16px; display: flex; align-items: center; gap: 8px;">
+                <button class="btn btn-primary" onclick="saveFilterRules()">保存规则</button>
+                <span id="filter-save-status" class="save-status"></span>
+            </div>
+            <div style="margin-top: 24px;">
+                <h2 style="margin-top:0;">最近命中记录</h2>
+                <table class="log-table">
+                    <thead>
+                        <tr>
+                            <th>时间</th>
+                            <th>标题</th>
+                            <th>字段</th>
+                            <th>关键词</th>
+                        </tr>
+                    </thead>
+                    <tbody id="discard-logs-table">
+                        <tr><td colspan="4" class="empty-state">暂无记录</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
     <script>
         // API helpers
         async function apiCall(url, options = {}) {
             const response = await fetch(url, options);
-            if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.error || 'Request failed');
+
+            const contentType = response.headers.get('content-type') || '';
+            let payload = null;
+
+            if (contentType.includes('application/json')) {
+                try {
+                    payload = await response.json();
+                } catch (_) {
+                    payload = null;
+                }
+            } else {
+                try {
+                    payload = await response.text();
+                } catch (_) {
+                    payload = null;
+                }
             }
-            return response.json();
+
+            if (!response.ok) {
+                const msg = (payload && payload.error)
+                    ? payload.error
+                    : (typeof payload === 'string' && payload.trim()
+                        ? payload.slice(0, 200)
+                        : `Request failed (${response.status})`);
+                throw new Error(msg);
+            }
+
+            return payload;
+        }
+
+        let scoringDimensions = [];
+        let activeFilterFeedId = null;
+        let feedsLoadedOnce = false;
+
+        function setFeedsRefreshStatus(message = '', isError = false) {
+            const el = document.getElementById('feeds-refresh-status');
+            el.textContent = message;
+            el.className = isError ? 'error-msg' : 'muted-status';
+        }
+
+        function linesToArray(text) {
+            return (text || '')
+                .split(/\n+/)
+                .map(line => line.trim())
+                .filter(Boolean);
+        }
+
+        // Load scoring prompts
+        async function loadScoringPrompts() {
+            try {
+                const data = await apiCall('/api/scoring/prompts');
+                scoringDimensions = data.score_dimensions || data.dimensions || [];
+                const promptMap = data.score_prompts || data.prompts || {};
+                const grid = document.getElementById('prompt-grid');
+                grid.innerHTML = scoringDimensions.map(name => `
+                    <div class="prompt-item">
+                        <label for="prompt-${escapeAttr(name)}">${escapeHtml(name)}</label>
+                        <textarea id="prompt-${escapeAttr(name)}" placeholder="填写 ${escapeHtml(name)} 的评分提示词">${escapeHtml(promptMap[name] || '')}</textarea>
+                    </div>
+                `).join('');
+                document.getElementById('combined-prompt').value = data.combined_prompt || '';
+            } catch (e) {
+                document.getElementById('prompt-grid').innerHTML = `<div class="error-msg" style="grid-column: 1 / -1;">Error: ${escapeHtml(e.message)}</div>`;
+            }
+        }
+
+        async function saveScoringPrompts() {
+            const status = document.getElementById('prompt-save-status');
+            const prompts = {};
+            for (const name of scoringDimensions) {
+                const el = document.getElementById(`prompt-${name}`);
+                prompts[name] = el ? el.value.trim() : '';
+            }
+            const combinedPrompt = document.getElementById('combined-prompt').value.trim();
+            status.textContent = 'Saving...';
+            try {
+                await apiCall('/api/scoring/prompts', {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ prompts, combined_prompt: combinedPrompt })
+                });
+                status.textContent = 'Saved';
+                setTimeout(() => { status.textContent = ''; }, 2500);
+            } catch (e) {
+                status.textContent = 'Save failed: ' + e.message;
+            }
         }
 
         // Load feeds
@@ -252,9 +480,13 @@
                 const tbody = document.getElementById('feeds-table');
                 if (feeds.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No feeds yet. Add one above!</td></tr>';
+                    feedsLoadedOnce = true;
+                    setFeedsRefreshStatus('');
                     return;
                 }
-                tbody.innerHTML = feeds.map(f => `
+                tbody.innerHTML = feeds.map(f => {
+                    const ruleSummary = `<span class="rule-count">T:${f.title_rule_count || 0} / C:${f.content_rule_count || 0}</span>`;
+                    return `
                     <tr>
                         <td>${f.id}</td>
                         <td>${escapeHtml(f.name)}</td>
@@ -268,15 +500,30 @@
                         </td>
                         <td>${f.last_fetched_at ? new Date(f.last_fetched_at).toLocaleString() : '-'}</td>
                         <td>
-                            <button class="btn btn-sm btn-primary" onclick="toggleFeed(${f.id})">
-                                ${f.enabled ? 'Disable' : 'Enable'}
+                            <button class="btn btn-sm btn-secondary"
+                                    data-feed-id="${f.id}"
+                                    data-feed-name="${escapeAttr(f.name)}"
+                                    onclick="openFilterModalFromButton(this)">
+                                过滤规则
                             </button>
-                            <button class="btn btn-sm btn-danger" onclick="deleteFeed(${f.id})">Delete</button>
+                            ${ruleSummary}
+                            <div style="margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap;">
+                                <button class="btn btn-sm btn-primary" onclick="toggleFeed(${f.id})">
+                                    ${f.enabled ? 'Disable' : 'Enable'}
+                                </button>
+                                <button class="btn btn-sm btn-danger" onclick="deleteFeed(${f.id})">Delete</button>
+                            </div>
                         </td>
                     </tr>
-                `).join('');
+                `;
+                }).join('');
+                feedsLoadedOnce = true;
+                setFeedsRefreshStatus('');
             } catch (e) {
-                document.getElementById('feeds-table').innerHTML = `<tr><td colspan="7" class="error-msg">Error: ${e.message}</td></tr>`;
+                if (!feedsLoadedOnce) {
+                    document.getElementById('feeds-table').innerHTML = `<tr><td colspan="7" class="error-msg">Error: ${e.message}</td></tr>`;
+                }
+                setFeedsRefreshStatus(`刷新失败：${e.message}`, true);
             }
         }
 
@@ -323,7 +570,7 @@
                 // Show last result message if any
                 if (data.last_result) {
                     const r = data.last_result;
-                    const msg = `Last: ${r.fetch?.articles_added || 0} added, ${r.sync?.synced || 0} synced`;
+                    const msg = `Last: ${r.fetch?.articles_added || 0} added, ${r.fetch?.articles_filtered || 0} filtered, ${r.sync?.synced || 0} synced`;
                     document.getElementById('sync-message').textContent = msg;
                 }
             } catch (e) {
@@ -392,6 +639,88 @@
             }
         }
 
+        function openFilterModalFromButton(button) {
+            const feedId = Number(button.dataset.feedId);
+            const feedName = button.dataset.feedName || '';
+            openFilterModal(feedId, feedName);
+        }
+
+        async function openFilterModal(feedId, feedName) {
+            activeFilterFeedId = feedId;
+            document.getElementById('filter-modal-title').textContent = `过滤规则 · ${feedName}`;
+            document.getElementById('filter-save-status').textContent = 'Loading...';
+            document.getElementById('filter-title-keywords').value = '';
+            document.getElementById('filter-content-keywords').value = '';
+            document.getElementById('discard-logs-table').innerHTML = '<tr><td colspan="4" class="empty-state">Loading...</td></tr>';
+            document.getElementById('filter-modal').classList.add('open');
+            try {
+                const [filters, logs] = await Promise.all([
+                    apiCall(`/api/feeds/${feedId}/filters`),
+                    apiCall(`/api/feeds/${feedId}/discard-logs?limit=20`)
+                ]);
+                document.getElementById('filter-title-keywords').value = (filters.title_keywords || []).join('\n');
+                document.getElementById('filter-content-keywords').value = (filters.content_keywords || []).join('\n');
+                renderDiscardLogs(logs || []);
+                document.getElementById('filter-save-status').textContent = '';
+            } catch (e) {
+                document.getElementById('filter-save-status').textContent = 'Load failed: ' + e.message;
+                document.getElementById('discard-logs-table').innerHTML = `<tr><td colspan="4" class="error-msg">Error: ${escapeHtml(e.message)}</td></tr>`;
+            }
+        }
+
+        function closeFilterModal() {
+            document.getElementById('filter-modal').classList.remove('open');
+            activeFilterFeedId = null;
+            document.getElementById('filter-save-status').textContent = '';
+        }
+
+        function maybeCloseFilterModal(event) {
+            if (event.target.id === 'filter-modal') {
+                closeFilterModal();
+            }
+        }
+
+        function renderDiscardLogs(logs) {
+            const tbody = document.getElementById('discard-logs-table');
+            if (!logs.length) {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty-state">暂无记录</td></tr>';
+                return;
+            }
+            tbody.innerHTML = logs.map(row => `
+                <tr>
+                    <td>${escapeHtml(row.created_at || '-')}</td>
+                    <td title="${escapeHtml(row.article_title || '')}">${escapeHtml(row.article_title || '(无标题)')}</td>
+                    <td>${escapeHtml(row.matched_field || '-')}</td>
+                    <td>${escapeHtml(row.matched_keyword || '-')}</td>
+                </tr>
+            `).join('');
+        }
+
+        async function saveFilterRules() {
+            if (!activeFilterFeedId) return;
+            const status = document.getElementById('filter-save-status');
+            const titleKeywords = linesToArray(document.getElementById('filter-title-keywords').value);
+            const contentKeywords = linesToArray(document.getElementById('filter-content-keywords').value);
+            status.textContent = 'Saving...';
+            try {
+                await apiCall(`/api/feeds/${activeFilterFeedId}/filters`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        title_keywords: titleKeywords,
+                        content_keywords: contentKeywords,
+                    })
+                });
+                status.textContent = 'Saved';
+                loadFeeds();
+                setTimeout(() => {
+                    if (status.textContent === 'Saved') status.textContent = '';
+                }, 2500);
+            } catch (e) {
+                status.textContent = 'Save failed: ' + e.message;
+            }
+        }
+
         // Trigger sync
         async function triggerSync() {
             try {
@@ -410,11 +739,15 @@
             return div.innerHTML;
         }
 
+        function escapeAttr(text) {
+            return escapeHtml(text).replace(/"/g, '&quot;');
+        }
+
         // Initial load and auto-refresh
+        loadScoringPrompts();
         loadFeeds();
         loadSyncStatus();
         setInterval(() => {
-            loadFeeds();
             loadSyncStatus();
         }, 5000);
     </script>

@@ -5,7 +5,9 @@ Handles feedparser integration with proper error handling.
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+import calendar
 from typing import List, Optional
 from urllib.parse import urlparse
 
@@ -19,6 +21,7 @@ class ParsedArticle:
     """Parsed article from RSS feed."""
     title: str
     url: str
+    guid: Optional[str]
     author: Optional[str]
     content_raw: Optional[str]
     published_at: Optional[str]
@@ -78,27 +81,27 @@ class FeedParser:
         # Title
         title = entry.get("title") or "Untitled"
 
-        # URL/Link - try multiple fields
-        link = None
-        for link_field in ["link", "id"]:
-            if entry.get(link_field):
-                link = entry[link_field]
-                break
+        # Keep guid/id and link separately; prefer link as canonical URL
+        guid = entry.get("id") or entry.get("guid")
+
+        # URL/Link - prefer link, fallback to id only if it looks like URL
+        link = entry.get("link")
+        if not link and guid and str(guid).startswith(("http://", "https://")):
+            link = guid
+
         if not link:
             logger.warning(f"Entry '{title}' has no link, skipping")
             return None
 
         # Validate URL
-        try:
-            urlparse(link)
-        except Exception:
+        parsed_url = urlparse(link)
+        if not parsed_url.scheme or not parsed_url.netloc:
             logger.warning(f"Entry '{title}' has invalid URL: {link}")
             return None
 
         # Author - fallback to feed title
         author = entry.get("author")
         if not author:
-            # Try author_detail
             author_detail = entry.get("author_detail", {})
             author = author_detail.get("name")
         if not author:
@@ -110,9 +113,10 @@ class FeedParser:
             if entry.get(date_field):
                 try:
                     time_struct = entry[date_field]
-                    published_at = datetime(*time_struct[:6]).isoformat()
+                    ts = calendar.timegm(time_struct)
+                    published_at = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).isoformat()
                     break
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     continue
 
         # Content - prefer content:encoded, then content, then description
@@ -130,6 +134,7 @@ class FeedParser:
         return ParsedArticle(
             title=title,
             url=link,
+            guid=str(guid) if guid else None,
             author=author,
             content_raw=content_raw,
             published_at=published_at,
