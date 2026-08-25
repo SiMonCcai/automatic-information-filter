@@ -17,6 +17,7 @@ The project is not tied to a particular source, model provider, or presentation 
 ## What it is useful for
 
 - Combine several sources and keep only the items worth reading
+- Cluster reports from different sources into one stable event record
 - Tag, score, summarize, or classify incoming information
 - Send normalized results to another system for presentation
 - Swap sources, decision logic, and outputs without rebuilding the pipeline
@@ -115,6 +116,19 @@ The request body is a normalized information item. The service returns:
 ```
 
 `accept` controls whether the item continues. `annotations` travel with it through later processors and sinks.
+
+## Duplicate-event handling
+
+Fingerprint deduplication only detects identical items. When several sources describe the same event with different titles, add a stateful event-clustering Processor:
+
+1. generate replaceable semantic embeddings from titles only;
+2. cosine-match them against a recent event window;
+3. attach matches to the existing event and reuse its stable output ID;
+4. persist every member, source URL, similarity, score, and representative change;
+5. score every member first, but run expensive summarization or classification only for candidates that clearly beat the current representative;
+6. fail open when embedding fails and continue with an independent event.
+
+The embedding provider, threshold, time window, state store, and sink remain adapter choices. The core framework does not require a specific implementation. See [Event-level deduplication](docs/event-deduplication.md) for the durable state machine, idempotency, and crash-recovery design.
 
 ## Write an adapter
 
