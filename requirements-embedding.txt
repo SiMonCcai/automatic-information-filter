@@ -1,0 +1,4 @@
+# Keep the calibrated title-vector behavior reproducible.
+fastembed==0.8.0
+onnxruntime==1.23.2
+numpy==2.2.6

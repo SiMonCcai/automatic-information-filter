@@ -8,12 +8,13 @@ import threading
 import base64
 import binascii
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from http import HTTPStatus
 
 from flask import Flask, render_template, request, jsonify, Response
 
 from .config import Config
-from .storage import Storage
+from .storage import Storage, SCORING_PROMPT_KEYS, AI_META_FIELDS
 from .runner import run_once
 
 
@@ -24,6 +25,18 @@ app.config['JSON_AS_ASCII'] = False
 config = Config.from_env()
 storage = Storage(config.db_path)
 sync_status = {'running': False, 'last_result': None}
+
+
+def to_beijing(time_str: str | None) -> str | None:
+    """Convert UTC-ish DB timestamp string to Asia/Shanghai display string."""
+    if not time_str:
+        return time_str
+    try:
+        # sqlite datetime('now') format: YYYY-MM-DD HH:MM:SS (UTC)
+        dt = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=ZoneInfo('UTC'))
+        return dt.astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return time_str
 
 
 def check_auth(username: str, password: str) -> bool:
@@ -63,6 +76,33 @@ def get_auth() -> tuple[str | None, str | None]:
     return None, None
 
 
+def sanitize_keywords(values) -> list[str]:
+    """Normalize textarea/API keyword lists into unique ordered strings."""
+    if values is None:
+        return []
+    if isinstance(values, str):
+        raw_items = values.splitlines()
+    elif isinstance(values, list):
+        raw_items = []
+        for item in values:
+            raw_items.extend(str(item or '').splitlines())
+    else:
+        return []
+
+    seen = set()
+    cleaned = []
+    for item in raw_items:
+        keyword = str(item or '').strip()
+        if not keyword:
+            continue
+        dedup_key = keyword.casefold()
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        cleaned.append(keyword)
+    return cleaned
+
+
 @app.before_request
 def require_auth():
     """Require HTTP Basic Auth for all requests."""
@@ -82,16 +122,22 @@ def index():
 def list_feeds():
     """List all feeds."""
     feeds = storage.list_feeds(enabled_only=False)
-    return jsonify([{
-        'id': f.id,
-        'name': f.name,
-        'url': f.url,
-        'enabled': f.enabled,
-        'default_author': f.default_author,
-        'last_fetched_at': f.last_fetched_at,
-        'fetch_error': f.fetch_error,
-        'created_at': f.created_at,
-    } for f in feeds])
+    payload = []
+    for f in feeds:
+        filters = storage.get_feed_keyword_filters(f.id)
+        payload.append({
+            'id': f.id,
+            'name': f.name,
+            'url': f.url,
+            'enabled': f.enabled,
+            'default_author': f.default_author,
+            'last_fetched_at': to_beijing(f.last_fetched_at),
+            'fetch_error': f.fetch_error,
+            'created_at': to_beijing(f.created_at),
+            'title_rule_count': len(filters['title_keywords']),
+            'content_rule_count': len(filters['content_keywords']),
+        })
+    return jsonify(payload)
 
 
 @app.route('/api/feeds', methods=['POST'])
@@ -140,6 +186,60 @@ def update_feed_author(feed_id: int):
     return jsonify({'success': True})
 
 
+@app.route('/api/feeds/<int:feed_id>/filters')
+def get_feed_filters(feed_id: int):
+    """Get keyword filters for a feed."""
+    feed = storage.get_feed(feed_id)
+    if not feed:
+        return jsonify({'error': 'Feed not found'}), HTTPStatus.NOT_FOUND
+    filters = storage.get_feed_keyword_filters(feed_id)
+    return jsonify({
+        'feed_id': feed_id,
+        'feed_name': feed.name,
+        'title_keywords': filters['title_keywords'],
+        'content_keywords': filters['content_keywords'],
+    })
+
+
+@app.route('/api/feeds/<int:feed_id>/filters', methods=['PUT'])
+def update_feed_filters(feed_id: int):
+    """Replace keyword filters for a feed."""
+    feed = storage.get_feed(feed_id)
+    if not feed:
+        return jsonify({'error': 'Feed not found'}), HTTPStatus.NOT_FOUND
+
+    data = request.get_json() or {}
+    title_keywords = sanitize_keywords(data.get('title_keywords'))
+    content_keywords = sanitize_keywords(data.get('content_keywords'))
+    storage.replace_feed_keyword_rules(feed_id, title_keywords, content_keywords)
+    return jsonify({
+        'success': True,
+        'feed_id': feed_id,
+        'title_keywords': title_keywords,
+        'content_keywords': content_keywords,
+    })
+
+
+@app.route('/api/feeds/<int:feed_id>/discard-logs')
+def get_feed_discard_logs(feed_id: int):
+    """List recent discard logs for a feed."""
+    feed = storage.get_feed(feed_id)
+    if not feed:
+        return jsonify({'error': 'Feed not found'}), HTTPStatus.NOT_FOUND
+    try:
+        limit = min(max(int(request.args.get('limit', 20)), 1), 100)
+    except ValueError:
+        limit = 20
+    rows = storage.list_article_discard_logs(feed_id, limit=limit)
+    return jsonify([
+        {
+            **row,
+            'created_at': to_beijing(row.get('created_at')),
+        }
+        for row in rows
+    ])
+
+
 @app.route('/api/sync/status')
 def sync_status_api():
     """Get current sync status."""
@@ -151,8 +251,8 @@ def sync_status_api():
         'unsynced_count': unsynced,
         'jobs': [{
             'id': j.id,
-            'started_at': j.started_at,
-            'finished_at': j.finished_at,
+            'started_at': to_beijing(j.started_at),
+            'finished_at': to_beijing(j.finished_at),
             'status': j.status,
             'articles_synced': j.articles_synced,
             'error': j.error_message,
@@ -179,6 +279,40 @@ def trigger_sync():
     thread.start()
 
     return jsonify({'success': True, 'message': 'Sync started'})
+
+
+@app.route('/api/scoring/prompts')
+def get_scoring_prompts():
+    """Return editable AI prompt config."""
+    cfg = storage.get_ai_prompt_config()
+    return jsonify({
+        'dimensions': SCORING_PROMPT_KEYS,
+        'prompts': cfg['score_prompts'],
+        'score_dimensions': cfg['score_dimensions'],
+        'score_prompts': cfg['score_prompts'],
+        'meta_fields': AI_META_FIELDS,
+        'combined_prompt': cfg['combined_prompt'],
+    })
+
+
+@app.route('/api/scoring/prompts', methods=['PUT'])
+def update_scoring_prompts():
+    """Persist AI prompt config."""
+    data = request.get_json() or {}
+    prompts = data.get('prompts') or data.get('score_prompts') or {}
+    if not isinstance(prompts, dict):
+        return jsonify({'error': 'prompts must be an object'}), HTTPStatus.BAD_REQUEST
+
+    sanitized = {key: str(prompts.get(key, '') or '').strip() for key in SCORING_PROMPT_KEYS}
+    combined_prompt = str(data.get('combined_prompt', '') or '').strip()
+    storage.set_scoring_prompts(sanitized)
+    storage.set_combined_prompt(combined_prompt)
+    cfg = storage.get_ai_prompt_config()
+    return jsonify({
+        'success': True,
+        'score_prompts': cfg['score_prompts'],
+        'combined_prompt': cfg['combined_prompt'],
+    })
 
 
 def run(host='127.0.0.1', port=5000, debug=False):
